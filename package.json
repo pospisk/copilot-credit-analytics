@@ -1,0 +1,149 @@
+{
+  "name": "copilot-credit-analytics",
+  "displayName": "Copilot Credit & Token Analytics",
+  "description": "Monitors GitHub Copilot credit & token usage, calculates workday-based daily budgets, tracks extra credits & debt, identifies expensive 40-60%+ chat sessions, and visualizes model & daily analytics.",
+  "version": "0.1.0",
+  "publisher": "pospisk",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "copilotAnalytics.showDashboard",
+        "title": "Copilot Analytics: Show Usage Dashboard"
+      },
+      {
+        "command": "copilotAnalytics.setCredits",
+        "title": "Copilot Analytics: Set Monthly & Extra Credits"
+      },
+      {
+        "command": "copilotAnalytics.logUsage",
+        "title": "Copilot Analytics: Log / Simulate Session Usage"
+      },
+      {
+        "command": "copilotAnalytics.refresh",
+        "title": "Copilot Analytics: Refresh Quota & Sessions"
+      },
+      {
+        "command": "copilotAnalytics.exportData",
+        "title": "Copilot Analytics: Export Monthly Report (JSON / CSV)"
+      }
+    ],
+    "configuration": {
+      "title": "Copilot Credit Analytics",
+      "properties": {
+        "copilotAnalytics.monthlyCredits": {
+          "type": "number",
+          "default": 300,
+          "description": "Base monthly Copilot credits (e.g., 300 for Copilot Pro, 1500 for Pro+, 50 for Free). Auto-updated from GitHub API when signed in unless overridden."
+        },
+        "copilotAnalytics.overrideApiEntitlement": {
+          "type": "boolean",
+          "default": false,
+          "description": "If true, always use copilotAnalytics.monthlyCredits instead of the entitlement returned by GitHub's API."
+        },
+        "copilotAnalytics.extraCredits": {
+          "type": "number",
+          "default": 0,
+          "description": "Additional purchased or topped-up credits available for the current month."
+        },
+        "copilotAnalytics.workDays": {
+          "type": "array",
+          "default": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "items": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 6
+          },
+          "description": "Days of the week counted as workdays (0 = Sunday, 1 = Monday, ..., 6 = Saturday)."
+        },
+        "copilotAnalytics.workHoursPerDay": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "maximum": 24,
+          "description": "Number of work hours in a standard workday (used to compute work-hour averages)."
+        },
+        "copilotAnalytics.holidays": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "List of non-working holiday dates in YYYY-MM-DD format to exclude from monthly workday calculations."
+        },
+        "copilotAnalytics.dailyPercentMode": {
+          "type": "string",
+          "enum": [
+            "adjusted",
+            "standard"
+          ],
+          "default": "adjusted",
+          "enumDescriptions": [
+            "Calculates daily % against your Debt/Extra-Adjusted Daily Limit (spreads extra credits & debt across remaining workdays).",
+            "Calculates daily % against the fixed Base Daily Limit (Monthly Credits / Total Workdays)."
+          ],
+          "description": "Determines whether the primary status bar % uses the debt/extra-adjusted daily limit or fixed base daily limit."
+        },
+        "copilotAnalytics.expensiveSessionMinPercent": {
+          "type": "number",
+          "default": 40,
+          "description": "Minimum % of the Recommended Daily Limit consumed in a single chat session to flag it as an Expensive Chat (40-60% Heavy tier)."
+        },
+        "copilotAnalytics.expensiveSessionMaxPercent": {
+          "type": "number",
+          "default": 60,
+          "description": "Upper threshold % of the Recommended Daily Limit separating Heavy (40-60%) sessions from Mega/Critical (>60%) sessions."
+        },
+        "copilotAnalytics.modelMultipliers": {
+          "type": "object",
+          "default": {
+            "claude-opus-4.5": 3,
+            "claude-opus-4": 10,
+            "claude-3.7-sonnet-thought": 1.25,
+            "claude-3.7-sonnet": 1,
+            "claude-3.5-sonnet": 1,
+            "claude-sonnet-4": 1,
+            "gemini-2.5-pro": 1,
+            "gemini-2.0-flash": 0.25,
+            "o1": 10,
+            "o3-mini": 0.33,
+            "o4-mini": 0.33,
+            "gpt-4.5": 50,
+            "gpt-4.1": 0,
+            "gpt-4o": 0,
+            "gpt-5-mini": 0,
+            "gpt-5": 1
+          },
+          "description": "Credit cost multiplier per message for each AI model substring."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node out/test-calc.js",
+    "package": "npm run compile && npx --yes @vscode/vsce package --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}
