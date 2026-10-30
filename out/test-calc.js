@@ -182,6 +182,38 @@ function runTests() {
     assert.strictEqual(scanned[0].messages, 2);
     assert.strictEqual(scanned[0].credits, 2);
     fs.rmSync(tmpRoot, { recursive: true, force: true });
+    // 6. Test Multi-Month History & Month-over-Month Comparison
+    const septSessions = [
+        {
+            sessionId: 'sep-1',
+            title: 'September Auth Overhaul',
+            workspaceName: 'repo-alpha',
+            dateStr: '2026-09-10',
+            startTime: new Date(2026, 8, 10, 10, 0).getTime(),
+            endTime: new Date(2026, 8, 10, 11, 0).getTime(),
+            durationMinutes: 60,
+            messages: 20,
+            credits: 100,
+            estimatedTokens: 20000,
+            cumulativeContextTokens: 90000,
+            modelsUsed: { 'claude-opus-4': { messages: 10, credits: 100 } },
+            primaryModel: 'claude-opus-4',
+            dailyLimitPercent: 0,
+            expenseTier: 'normal',
+            hasContextBloat: true,
+            post20TurnCredits: 0
+        }
+    ];
+    const historyComp = (0, tracker_1.computeHistoryComparison)(config, now, 2026, 9, // October 2026
+    {
+        '2026-10': sessions,
+        '2026-09': septSessions
+    }, undefined, 6);
+    assert.strictEqual(historyComp.selectedMonthKey, '2026-10');
+    assert.strictEqual(historyComp.previousMonthKey, '2026-09');
+    assert.strictEqual(historyComp.monthsHistory.length, 6, 'Should return 6 months of history');
+    assert.strictEqual(historyComp.previousSnapshot.totalUsedCredits, 100, 'Previous month (Sept) used 100 credits');
+    assert.strictEqual(historyComp.momSameDayDeltaCredits, 43.2, 'Through Day 15: Oct used 143.2 vs Sept 100 -> +43.2 delta');
     console.log('✅ All Copilot Credit & Session Analytics tests passed!');
 }
 runTests();

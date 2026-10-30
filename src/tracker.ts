@@ -193,6 +193,49 @@ export interface AnalyticsSnapshot {
   insights: string[];
 }
 
+export interface MonthHistorySummary {
+  monthKey: string; // YYYY-MM
+  label: string;    // e.g. "Oct 2026"
+  year: number;
+  month: number;
+  isCurrentMonth: boolean;
+  isSelected: boolean;
+  totalWorkdays: number;
+  elapsedWorkdays: number;
+  totalMonthlyCredits: number;
+  usedCredits: number;
+  usedPercent: number;
+  recommendedDailyLimit: number;
+  workdayAverageCredits: number;
+  workHourAverageCredits: number;
+  weeklyAverageCredits: number;
+  endBalance: number; // +Surplus or -Debt
+  totalSessions: number;
+  expensive40to60: number;
+  expensiveOver60: number;
+  totalExpensiveChats: number;
+  topModel: string;
+  dailyCumulative: number[]; // index 0..30 for day 1..31
+  dailyCredits: number[];    // index 0..30 for day 1..31
+}
+
+export interface HistoryComparison {
+  selectedMonthKey: string;
+  selectedSnapshot: AnalyticsSnapshot;
+  previousMonthKey: string;
+  previousMonthLabel: string;
+  previousSnapshot: AnalyticsSnapshot;
+  monthsHistory: MonthHistorySummary[]; // last 6 months chronological
+  // Month-over-Month (MoM) Deltas (Selected vs Previous Month)
+  sameDaySelectedCredits: number;
+  sameDayPreviousCredits: number;
+  momSameDayDeltaCredits: number;
+  momSameDayDeltaPercent: number;
+  momWorkdayAvgDeltaCredits: number;
+  momWorkdayAvgDeltaPercent: number;
+  momExpensiveChatsDelta: number;
+}
+
 export const DEFAULT_MODEL_MULTIPLIERS: Record<string, number> = {
   'claude-opus-4.5': 3,
   'claude-opus-4': 10,
@@ -1101,4 +1144,162 @@ export function computeAnalytics(
     insights
   };
 }
+
+const MONTH_SHORT_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+export function formatMonthKey(year: number, month: number): string {
+  return `${year}-${String(month + 1).padStart(2, '0')}`;
+}
+
+export function getMonthShortLabel(year: number, month: number): string {
+  return `${MONTH_SHORT_NAMES[month] || 'Mon'} ${year}`;
+}
+
+/**
+ * Computes multi-month history summaries (up to `monthsBack` months) and a detailed comparison
+ * between the selected month (`selectedYear`, `selectedMonth`) and its immediately preceding month.
+ */
+export function computeHistoryComparison(
+  config: TrackerConfig,
+  realNow: Date,
+  selectedYear: number,
+  selectedMonth: number,
+  sessionsByMonth: Record<string, SessionRecord[]>,
+  currentMonthApiQuota?: ApiQuotaInfo,
+  monthsBack = 6
+): HistoryComparison {
+  const realYear = realNow.getFullYear();
+  const realMonth = realNow.getMonth();
+  const realMonthKey = formatMonthKey(realYear, realMonth);
+  const selectedMonthKey = formatMonthKey(selectedYear, selectedMonth);
+
+  const buildSnapshotForMonth = (y: number, m: number): AnalyticsSnapshot => {
+    const mKey = formatMonthKey(y, m);
+    const isCurrent = mKey === realMonthKey;
+    const daysInMonth = new Date(y, m + 1, 0).getDate();
+    // For any historical month prior to realNow, use the last day of that month so all days/workdays are elapsed
+    const refDate = isCurrent
+      ? realNow
+      : new Date(y, m, daysInMonth, 23, 59, 59);
+    const monthSessions = sessionsByMonth[mKey] || [];
+    return computeAnalytics(config, refDate, monthSessions, isCurrent ? currentMonthApiQuota : undefined);
+  };
+
+  const selectedSnapshot = buildSnapshotForMonth(selectedYear, selectedMonth);
+
+  // Immediately preceding month relative to selected month
+  const prevDate = new Date(selectedYear, selectedMonth - 1, 1);
+  const prevYear = prevDate.getFullYear();
+  const prevMonth = prevDate.getMonth();
+  const previousMonthKey = formatMonthKey(prevYear, prevMonth);
+  const previousMonthLabel = `${MONTH_NAMES[prevMonth]} ${prevYear}`;
+  const previousSnapshot = buildSnapshotForMonth(prevYear, prevMonth);
+
+  // Build chronological list of last N months up to realNow
+  const monthsHistory: MonthHistorySummary[] = [];
+  for (let offset = monthsBack - 1; offset >= 0; offset--) {
+    const dt = new Date(realYear, realMonth - offset, 1);
+    const y = dt.getFullYear();
+    const m = dt.getMonth();
+    const mKey = formatMonthKey(y, m);
+    const snap =
+      mKey === selectedMonthKey
+        ? selectedSnapshot
+        : mKey === previousMonthKey
+        ? previousSnapshot
+        : buildSnapshotForMonth(y, m);
+
+    const dailyCumulative = new Array<number>(31).fill(0);
+    const dailyCredits = new Array<number>(31).fill(0);
+    let lastCum = 0;
+    for (let d = 1; d <= 31; d++) {
+      const pt = snap.dailySeries[d - 1];
+      if (pt) {
+        dailyCredits[d - 1] = pt.credits;
+        if (!pt.isFuture) {
+          lastCum = pt.cumulativeUsed;
+        }
+        dailyCumulative[d - 1] = pt.isFuture ? lastCum : pt.cumulativeUsed;
+      } else {
+        dailyCumulative[d - 1] = lastCum;
+      }
+    }
+
+    const isCurr = mKey === realMonthKey;
+    // End balance: for past months, totalMonthlyCredits - totalUsedCredits; for current month, netBalance
+    const endBalance = isCurr
+      ? snap.netBalance
+      : Math.round((snap.totalMonthlyCredits - snap.totalUsedCredits) * 100) / 100;
+
+    monthsHistory.push({
+      monthKey: mKey,
+      label: getMonthShortLabel(y, m),
+      year: y,
+      month: m,
+      isCurrentMonth: isCurr,
+      isSelected: mKey === selectedMonthKey,
+      totalWorkdays: snap.calendar.totalWorkdays,
+      elapsedWorkdays: snap.calendar.elapsedWorkdays,
+      totalMonthlyCredits: snap.totalMonthlyCredits,
+      usedCredits: snap.totalUsedCredits,
+      usedPercent: snap.monthlyUsedPercent,
+      recommendedDailyLimit: snap.recommendedDailyLimit,
+      workdayAverageCredits: snap.workdayAverageCredits,
+      workHourAverageCredits: snap.workHourAverageCredits,
+      weeklyAverageCredits: snap.weeklyAverageCredits,
+      endBalance,
+      totalSessions: snap.totalSessions,
+      expensive40to60: snap.monthExpensive40to60,
+      expensiveOver60: snap.monthExpensiveOver60,
+      totalExpensiveChats: snap.monthTotalExpensiveChats,
+      topModel: snap.models[0]?.model || '-',
+      dailyCumulative,
+      dailyCredits
+    });
+  }
+
+  // Compare Selected Month vs Previous Month at the same day-of-month point (e.g. Day 15 vs Day 15)
+  const compareDay = Math.min(selectedSnapshot.calendar.currentDay, previousSnapshot.calendar.daysInMonth);
+  const sameDaySelectedCredits =
+    selectedSnapshot.dailySeries[compareDay - 1]?.cumulativeUsed ?? selectedSnapshot.totalUsedCredits;
+  const sameDayPreviousCredits =
+    previousSnapshot.dailySeries[compareDay - 1]?.cumulativeUsed ?? previousSnapshot.totalUsedCredits;
+
+  const momSameDayDeltaCredits = Math.round((sameDaySelectedCredits - sameDayPreviousCredits) * 100) / 100;
+  const momSameDayDeltaPercent =
+    sameDayPreviousCredits > 0
+      ? Math.round(((sameDaySelectedCredits - sameDayPreviousCredits) / sameDayPreviousCredits) * 1000) / 10
+      : (sameDaySelectedCredits > 0 ? 100 : 0);
+
+  const momWorkdayAvgDeltaCredits =
+    Math.round((selectedSnapshot.workdayAverageCredits - previousSnapshot.workdayAverageCredits) * 100) / 100;
+  const momWorkdayAvgDeltaPercent =
+    previousSnapshot.workdayAverageCredits > 0
+      ? Math.round(
+          ((selectedSnapshot.workdayAverageCredits - previousSnapshot.workdayAverageCredits) /
+            previousSnapshot.workdayAverageCredits) *
+            1000
+        ) / 10
+      : 0;
+
+  const momExpensiveChatsDelta =
+    selectedSnapshot.monthTotalExpensiveChats - previousSnapshot.monthTotalExpensiveChats;
+
+  return {
+    selectedMonthKey,
+    selectedSnapshot,
+    previousMonthKey,
+    previousMonthLabel,
+    previousSnapshot,
+    monthsHistory,
+    sameDaySelectedCredits,
+    sameDayPreviousCredits,
+    momSameDayDeltaCredits,
+    momSameDayDeltaPercent,
+    momWorkdayAvgDeltaCredits,
+    momWorkdayAvgDeltaPercent,
+    momExpensiveChatsDelta
+  };
+}
+
 

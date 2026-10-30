@@ -42,12 +42,15 @@ const tracker_1 = require("./tracker");
 const MANUAL_SESSIONS_KEY = 'copilotAnalytics.manualSessions.v1';
 const LAST_API_QUOTA_KEY = 'copilotAnalytics.lastApiQuota.v1';
 const ALERTED_SESSION_IDS_KEY = 'copilotAnalytics.alertedSessions.v1';
+const HISTORY_MONTHS_COUNT = 6;
 let statusBarItem;
 let dashboardPanel;
-let latestSnapshot;
+let currentMonthSnapshot;
+let latestHistoryComparison;
+let selectedYear;
+let selectedMonth;
 let refreshTimer;
 function activate(context) {
-    // Create bottom-right Status Bar Info Box
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     statusBarItem.command = 'copilotAnalytics.showDashboard';
     statusBarItem.name = 'Copilot Credit & Daily Limit Monitor';
@@ -57,6 +60,10 @@ function activate(context) {
     const refreshAll = async (interactiveAuth = false) => {
         const config = readTrackerConfig();
         const now = new Date();
+        if (selectedYear === undefined || selectedMonth === undefined) {
+            selectedYear = now.getFullYear();
+            selectedMonth = now.getMonth();
+        }
         // 1. Fetch GitHub Copilot API quota if signed in
         let apiQuota = context.globalState.get(LAST_API_QUOTA_KEY);
         try {
@@ -74,23 +81,46 @@ function activate(context) {
         catch {
             // Fallback to cached quota or local calculation
         }
-        // 2. Locate workspaceStorage root from globalStorageUri
-        // globalStorageUri is typically .../User/globalStorage/<publisher>.<ext>
+        // 2. Scan local + manual sessions across the last 6 months
         const userDir = path.dirname(path.dirname(context.globalStorageUri.fsPath));
         const workspaceStorageRoot = path.join(userDir, 'workspaceStorage');
-        const localSessions = (0, tracker_1.scanLocalChatSessions)(workspaceStorageRoot, now.getFullYear(), now.getMonth(), config.modelMultipliers);
-        const manualSessions = getManualSessionsForCurrentMonth(context, now.getFullYear(), now.getMonth());
-        const allSessions = [...localSessions, ...manualSessions];
-        latestSnapshot = (0, tracker_1.computeAnalytics)(config, now, allSessions, apiQuota);
-        updateStatusBar(latestSnapshot);
-        checkActiveSessionWarnings(context, latestSnapshot, config);
-        if (dashboardPanel) {
-            dashboardPanel.webview.html = renderDashboardHtml(latestSnapshot, config);
+        const allManual = context.globalState.get(MANUAL_SESSIONS_KEY, []);
+        const sessionsByMonth = {};
+        // Ensure we cover both the 6-month history window and any older selected month + its previous month
+        const monthsToLoad = new Set();
+        for (let offset = 0; offset <= HISTORY_MONTHS_COUNT; offset++) {
+            const dt = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+            monthsToLoad.add((0, tracker_1.formatMonthKey)(dt.getFullYear(), dt.getMonth()));
+        }
+        const selDt = new Date(selectedYear, selectedMonth, 1);
+        const prevSelDt = new Date(selectedYear, selectedMonth - 1, 1);
+        monthsToLoad.add((0, tracker_1.formatMonthKey)(selDt.getFullYear(), selDt.getMonth()));
+        monthsToLoad.add((0, tracker_1.formatMonthKey)(prevSelDt.getFullYear(), prevSelDt.getMonth()));
+        for (const mKey of monthsToLoad) {
+            const [yStr, mStr] = mKey.split('-');
+            const y = Number(yStr);
+            const m = Number(mStr) - 1;
+            const local = (0, tracker_1.scanLocalChatSessions)(workspaceStorageRoot, y, m, config.modelMultipliers);
+            const manual = allManual.filter(s => s.dateStr && s.dateStr.startsWith(`${mKey}-`));
+            sessionsByMonth[mKey] = [...local, ...manual];
+        }
+        // Compute history comparison for the selected month
+        latestHistoryComparison = (0, tracker_1.computeHistoryComparison)(config, now, selectedYear, selectedMonth, sessionsByMonth, apiQuota, HISTORY_MONTHS_COUNT);
+        // Current month snapshot always drives the bottom-right status bar
+        const currentKey = (0, tracker_1.formatMonthKey)(now.getFullYear(), now.getMonth());
+        currentMonthSnapshot =
+            latestHistoryComparison.selectedMonthKey === currentKey
+                ? latestHistoryComparison.selectedSnapshot
+                : (0, tracker_1.computeHistoryComparison)(config, now, now.getFullYear(), now.getMonth(), sessionsByMonth, apiQuota, 2).selectedSnapshot;
+        updateStatusBar(currentMonthSnapshot);
+        checkActiveSessionWarnings(context, currentMonthSnapshot, config);
+        if (dashboardPanel && latestHistoryComparison) {
+            dashboardPanel.webview.html = renderDashboardHtml(latestHistoryComparison, config);
         }
     };
     // Register Commands
     context.subscriptions.push(vscode.commands.registerCommand('copilotAnalytics.showDashboard', async () => {
-        if (!latestSnapshot) {
+        if (!latestHistoryComparison) {
             await refreshAll(false);
         }
         openDashboardPanel(context, refreshAll);
@@ -128,20 +158,18 @@ function activate(context) {
         await promptLogSession(context);
         await refreshAll(false);
     }), vscode.commands.registerCommand('copilotAnalytics.exportData', async () => {
-        if (!latestSnapshot) {
+        if (!latestHistoryComparison) {
             await refreshAll(false);
         }
-        if (latestSnapshot) {
-            await exportAnalyticsReport(latestSnapshot);
+        if (latestHistoryComparison) {
+            await exportAnalyticsReport(latestHistoryComparison);
         }
     }));
-    // Refresh when settings change
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
         if (e.affectsConfiguration('copilotAnalytics')) {
             refreshAll(false);
         }
     }));
-    // Initial load + periodic refresh every 2 minutes
     refreshAll(false);
     refreshTimer = setInterval(() => refreshAll(false), 120_000);
     context.subscriptions.push({
@@ -171,11 +199,6 @@ function readTrackerConfig() {
         expensiveSessionMaxPercent: cfg.get('expensiveSessionMaxPercent', 60),
         modelMultipliers: cfg.get('modelMultipliers', {})
     };
-}
-function getManualSessionsForCurrentMonth(context, year, month) {
-    const all = context.globalState.get(MANUAL_SESSIONS_KEY, []);
-    const prefix = `${year}-${String(month + 1).padStart(2, '0')}-`;
-    return all.filter(s => s.dateStr && s.dateStr.startsWith(prefix));
 }
 async function promptLogSession(context) {
     const config = readTrackerConfig();
@@ -259,15 +282,15 @@ async function addManualSession(context, params) {
     await context.globalState.update(MANUAL_SESSIONS_KEY, existing);
 }
 /**
- * Seeds realistic sample sessions across the current month so the user can test charts,
- * 40-60% expensive chat counters, extra/debt math, and model breakdowns immediately.
+ * Seeds realistic sample sessions across the current month AND previous 3 months so the user
+ * can test current charts, 40-60% expensive chat counters, and multi-month History Comparisons.
  */
 async function seedSampleData(context, config) {
     const now = new Date();
     const year = now.getFullYear();
     const month = now.getMonth();
     const todayDay = now.getDate();
-    const sampleTemplates = [
+    const currentMonthTemplates = [
         { dayOffset: -6, hour: 10, title: 'Architecture migration to microservices', model: 'claude-3.7-sonnet-thought', messages: 6, ws: 'backend-api' },
         { dayOffset: -5, hour: 14, title: 'Deep race-condition root cause analysis', model: 'claude-opus-4', messages: 1, ws: 'core-engine' },
         { dayOffset: -4, hour: 11, title: 'Build GraphQL schema & resolvers', model: 'claude-3.7-sonnet', messages: 7, ws: 'backend-api' },
@@ -278,7 +301,7 @@ async function seedSampleData(context, config) {
         { dayOffset: 0, hour: 10, title: 'Implement real-time analytics dashboard UI', model: 'claude-3.7-sonnet', messages: 7, ws: 'copilot-analytics' },
         { dayOffset: 0, hour: 14, title: 'Complex AST parser debugging session', model: 'claude-3.7-sonnet-thought', messages: 5, ws: 'core-engine' }
     ];
-    for (const tpl of sampleTemplates) {
+    for (const tpl of currentMonthTemplates) {
         const targetDay = Math.max(1, todayDay + tpl.dayOffset);
         const dateStr = (0, tracker_1.formatDateYMD)(new Date(year, month, targetDay));
         await addManualSession(context, {
@@ -290,6 +313,56 @@ async function seedSampleData(context, config) {
             hour: tpl.hour,
             config
         });
+    }
+    // Also seed previous 3 months for rich History Comparison graphs
+    const pastMonthsSpecs = [
+        {
+            monthOffset: -1,
+            items: [
+                { day: 3, hour: 10, title: 'Database sharding design & POC', model: 'claude-3.7-sonnet', messages: 14, ws: 'backend-api' },
+                { day: 7, hour: 15, title: 'Opus deep security audit', model: 'claude-opus-4', messages: 2, ws: 'auth-gateway' },
+                { day: 11, hour: 11, title: 'React state hydration bugfix', model: 'claude-3.7-sonnet', messages: 9, ws: 'frontend-web' },
+                { day: 15, hour: 14, title: 'Kubernetes Helm chart automation', model: 'gemini-2.5-pro', messages: 11, ws: 'infra-ops' },
+                { day: 19, hour: 16, title: 'Payment retry queue marathon', model: 'claude-3.7-sonnet-thought', messages: 22, ws: 'billing-service' },
+                { day: 24, hour: 10, title: 'End-to-end Playwright test suite', model: 'claude-3.7-sonnet', messages: 12, ws: 'frontend-web' },
+                { day: 27, hour: 13, title: 'API rate limiter optimization', model: 'claude-3.7-sonnet', messages: 8, ws: 'backend-api' }
+            ]
+        },
+        {
+            monthOffset: -2,
+            items: [
+                { day: 4, hour: 11, title: 'Initial monorepo setup & turbo config', model: 'claude-3.7-sonnet', messages: 10, ws: 'core-engine' },
+                { day: 9, hour: 14, title: 'WebSocket protocol binary serializer', model: 'claude-opus-4.5', messages: 5, ws: 'core-engine' },
+                { day: 16, hour: 10, title: 'SSO SAML integration', model: 'claude-3.7-sonnet', messages: 15, ws: 'auth-gateway' },
+                { day: 22, hour: 15, title: 'Stripe invoice sync worker', model: 'gemini-2.5-pro', messages: 12, ws: 'billing-service' }
+            ]
+        },
+        {
+            monthOffset: -3,
+            items: [
+                { day: 5, hour: 10, title: 'Legacy REST to gRPC bridge', model: 'claude-3.7-sonnet', messages: 11, ws: 'backend-api' },
+                { day: 14, hour: 16, title: 'Memory leak profiling in worker pool', model: 'claude-opus-4', messages: 1, ws: 'core-engine' },
+                { day: 20, hour: 11, title: 'Design system token migration', model: 'gpt-4.1', messages: 18, ws: 'frontend-web' },
+                { day: 25, hour: 14, title: 'Redis cluster failover handling', model: 'claude-3.7-sonnet', messages: 9, ws: 'infra-ops' }
+            ]
+        }
+    ];
+    for (const pm of pastMonthsSpecs) {
+        const dt = new Date(year, month + pm.monthOffset, 1);
+        const py = dt.getFullYear();
+        const pMonth = dt.getMonth();
+        for (const item of pm.items) {
+            const dateStr = (0, tracker_1.formatDateYMD)(new Date(py, pMonth, item.day));
+            await addManualSession(context, {
+                title: item.title,
+                model: item.model,
+                messages: item.messages,
+                workspaceName: item.ws,
+                dateStr,
+                hour: item.hour,
+                config
+            });
+        }
     }
 }
 function checkActiveSessionWarnings(context, snap, config) {
@@ -316,10 +389,6 @@ function makeAsciiBar(percent, width = 14) {
     const filled = Math.round((clamped / 100) * width);
     return '█'.repeat(filled) + '░'.repeat(Math.max(0, width - filled));
 }
-/**
- * Updates the bottom-right Status Bar Info Box with color coding, daily limit %, extra credits & debt,
- * and a rich interactive Markdown tooltip card.
- */
 function updateStatusBar(snap) {
     const pctText = `${snap.activeDailyPercent.toFixed(0)}%`;
     const targetLimit = readTrackerConfig().dailyPercentMode === 'standard'
@@ -340,7 +409,6 @@ function updateStatusBar(snap) {
     else {
         statusBarItem.backgroundColor = undefined;
     }
-    // Build Rich Hover Info Box
     const md = new vscode.MarkdownString('', true);
     md.isTrusted = true;
     md.supportHtml = true;
@@ -373,8 +441,8 @@ function updateStatusBar(snap) {
 function openDashboardPanel(context, refreshAll) {
     if (dashboardPanel) {
         dashboardPanel.reveal(vscode.ViewColumn.One);
-        if (latestSnapshot) {
-            dashboardPanel.webview.html = renderDashboardHtml(latestSnapshot, readTrackerConfig());
+        if (latestHistoryComparison) {
+            dashboardPanel.webview.html = renderDashboardHtml(latestHistoryComparison, readTrackerConfig());
         }
         return;
     }
@@ -382,12 +450,32 @@ function openDashboardPanel(context, refreshAll) {
         enableScripts: true,
         retainContextWhenHidden: true
     });
-    if (latestSnapshot) {
-        dashboardPanel.webview.html = renderDashboardHtml(latestSnapshot, readTrackerConfig());
+    if (latestHistoryComparison) {
+        dashboardPanel.webview.html = renderDashboardHtml(latestHistoryComparison, readTrackerConfig());
     }
     dashboardPanel.webview.onDidReceiveMessage(async (msg) => {
         const cfg = vscode.workspace.getConfiguration('copilotAnalytics');
-        if (msg.type === 'updateBudget') {
+        if (msg.type === 'selectMonth' && typeof msg.monthKey === 'string') {
+            const [yStr, mStr] = msg.monthKey.split('-');
+            const y = Number(yStr);
+            const m = Number(mStr) - 1;
+            if (!isNaN(y) && !isNaN(m)) {
+                selectedYear = y;
+                selectedMonth = m;
+                await refreshAll(false);
+            }
+        }
+        else if (msg.type === 'stepMonth' && typeof msg.delta === 'number') {
+            const now = new Date();
+            const dt = new Date(selectedYear ?? now.getFullYear(), (selectedMonth ?? now.getMonth()) + msg.delta, 1);
+            // Do not step into future months beyond current month
+            if (dt.getFullYear() < now.getFullYear() || (dt.getFullYear() === now.getFullYear() && dt.getMonth() <= now.getMonth())) {
+                selectedYear = dt.getFullYear();
+                selectedMonth = dt.getMonth();
+                await refreshAll(false);
+            }
+        }
+        else if (msg.type === 'updateBudget') {
             await cfg.update('monthlyCredits', Number(msg.monthlyCredits) || 300, vscode.ConfigurationTarget.Global);
             await cfg.update('overrideApiEntitlement', true, vscode.ConfigurationTarget.Global);
             await cfg.update('extraCredits', Math.max(0, Number(msg.extraCredits) || 0), vscode.ConfigurationTarget.Global);
@@ -410,7 +498,7 @@ function openDashboardPanel(context, refreshAll) {
         else if (msg.type === 'seedDemo') {
             await seedSampleData(context, readTrackerConfig());
             await refreshAll(false);
-            vscode.window.showInformationMessage('Loaded sample Copilot sessions across the month.');
+            vscode.window.showInformationMessage('Loaded sample Copilot sessions across current + previous 3 months.');
         }
         else if (msg.type === 'clearManual') {
             await context.globalState.update(MANUAL_SESSIONS_KEY, []);
@@ -421,8 +509,8 @@ function openDashboardPanel(context, refreshAll) {
             await refreshAll(true);
         }
         else if (msg.type === 'export') {
-            if (latestSnapshot) {
-                await exportAnalyticsReport(latestSnapshot);
+            if (latestHistoryComparison) {
+                await exportAnalyticsReport(latestHistoryComparison);
             }
         }
     });
@@ -430,8 +518,9 @@ function openDashboardPanel(context, refreshAll) {
         dashboardPanel = undefined;
     });
 }
-async function exportAnalyticsReport(snap) {
-    const formatPick = await vscode.window.showQuickPick(['JSON (Full Report)', 'CSV (Daily & Sessions Summary)'], {
+async function exportAnalyticsReport(historyComp) {
+    const snap = historyComp.selectedSnapshot;
+    const formatPick = await vscode.window.showQuickPick(['JSON (Full Report + History)', 'CSV (Daily, Sessions & Multi-Month History)'], {
         title: 'Export Copilot Credit Analytics Report'
     });
     if (!formatPick) {
@@ -440,18 +529,21 @@ async function exportAnalyticsReport(snap) {
     const isJson = formatPick.startsWith('JSON');
     const defaultExt = isJson ? 'json' : 'csv';
     const uri = await vscode.window.showSaveDialog({
-        defaultUri: vscode.Uri.file(path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.env.HOME || '.', `copilot-analytics-${snap.calendar.year}-${String(snap.calendar.month + 1).padStart(2, '0')}.${defaultExt}`))
+        defaultUri: vscode.Uri.file(path.join(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.env.HOME || '.', `copilot-analytics-${historyComp.selectedMonthKey}.${defaultExt}`))
     });
     if (!uri) {
         return;
     }
     if (isJson) {
-        fs.writeFileSync(uri.fsPath, JSON.stringify(snap, null, 2), 'utf8');
+        fs.writeFileSync(uri.fsPath, JSON.stringify(historyComp, null, 2), 'utf8');
     }
     else {
         const lines = [
             'Section,DateOrName,Workday,Messages,Credits,DailyLimitPercent,Expensive40to60,ExpensiveOver60,WorkspaceOrMultiplier'
         ];
+        for (const mh of historyComp.monthsHistory) {
+            lines.push(`HistoryMonth,${mh.monthKey},${mh.totalWorkdays},-,${mh.usedCredits},${mh.usedPercent}%,${mh.expensive40to60},${mh.expensiveOver60},Avg:${mh.workdayAverageCredits}/day`);
+        }
         for (const d of snap.dailySeries) {
             lines.push(`Daily,${d.dateStr},${d.isWorkday},${d.messages},${d.credits},${d.dailyPercent}%,${d.expensiveChats40to60},${d.expensiveChatsOver60},Limit:${d.recommendedLimit}`);
         }
@@ -472,19 +564,17 @@ function escapeHtml(str) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
 }
-/**
- * Generates the interactive Dashboard Webview HTML with pure SVG charts, color-coded gauges,
- * Most Expensive Sessions leaderboard, Daily 40-60% / >60% Expensive Chat counters,
- * Model breakdown, Workspace breakdown, and inline budget controls.
- */
-function renderDashboardHtml(snap, config) {
+function renderDashboardHtml(historyComp, config) {
+    const snap = historyComp.selectedSnapshot;
+    const prevSnap = historyComp.previousSnapshot;
+    const nowKey = (0, tracker_1.formatMonthKey)(new Date().getFullYear(), new Date().getMonth());
+    const isViewingCurrentMonth = historyComp.selectedMonthKey === nowKey;
     const tierColors = {
         green: '#22c55e',
         yellow: '#eab308',
         orange: '#f97316',
         red: '#ef4444'
     };
-    // --- SVG 1: Daily Usage Bar Chart + Recommended Daily Limit Line + Expensive Chat Markers ---
     const chartW = 760;
     const chartH = 220;
     const padL = 42;
@@ -493,6 +583,7 @@ function renderDashboardHtml(snap, config) {
     const padB = 34;
     const plotW = chartW - padL - padR;
     const plotH = chartH - padT - padB;
+    // --- SVG 1: Daily Usage Bar Chart + Recommended Daily Limit Line + Expensive Chat Markers ---
     const maxDailyCredits = Math.max(snap.recommendedDailyLimit * 1.4, ...snap.dailySeries.map(d => d.credits), 5);
     const barStep = plotW / snap.dailySeries.length;
     const barW = Math.max(6, barStep * 0.68);
@@ -506,8 +597,7 @@ function renderDashboardHtml(snap, config) {
             ? 'rgba(148,163,184,0.15)'
             : tierColors[d.colorTier] || '#22c55e';
         const opacity = d.isWorkday ? '0.92' : '0.45';
-        const todayStroke = d.isToday ? 'stroke="#38bdf8" stroke-width="2"' : '';
-        // Expensive chat badge above bar if any 40-60% or >60% chats occurred on that day
+        const todayStroke = d.isToday && isViewingCurrentMonth ? 'stroke="#38bdf8" stroke-width="2"' : '';
         let expMarker = '';
         if (d.totalExpensiveChats > 0) {
             const badgeColor = d.expensiveChatsOver60 > 0 ? '#ef4444' : '#f97316';
@@ -517,9 +607,9 @@ function renderDashboardHtml(snap, config) {
           <text x="${(x + barW / 2).toFixed(1)}" y="${(markerY + 3.5).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="9" font-weight="bold">${d.totalExpensiveChats}</text>
         `;
         }
-        const showDayLabel = d.dayOfMonth === 1 || d.dayOfMonth % 3 === 0 || d.isToday || d.dayOfMonth === snap.calendar.daysInMonth;
+        const showDayLabel = d.dayOfMonth === 1 || d.dayOfMonth % 3 === 0 || (d.isToday && isViewingCurrentMonth) || d.dayOfMonth === snap.calendar.daysInMonth;
         const dayLabel = showDayLabel
-            ? `<text x="${(x + barW / 2).toFixed(1)}" y="${chartH - 10}" text-anchor="middle" fill="${d.isToday ? '#38bdf8' : '#94a3b8'}" font-size="10" font-weight="${d.isToday ? '700' : '400'}">${d.dayOfMonth}</text>`
+            ? `<text x="${(x + barW / 2).toFixed(1)}" y="${chartH - 10}" text-anchor="middle" fill="${d.isToday && isViewingCurrentMonth ? '#38bdf8' : '#94a3b8'}" font-size="10" font-weight="${d.isToday && isViewingCurrentMonth ? '700' : '400'}">${d.dayOfMonth}</text>`
             : '';
         const tooltip = `${d.dateStr} (${d.weekdayName}${d.isWorkday ? ' - Workday' : ' - Weekend/Holiday'}): ${d.credits} cr (${d.dailyPercent}% of limit) | ${d.messages} msgs | Expensive chats: ${d.expensiveChats40to60} (40-60%), ${d.expensiveChatsOver60} (>60%)`;
         return `
@@ -545,7 +635,71 @@ function renderDashboardHtml(snap, config) {
             actualPoints.push(`${cx.toFixed(1)},${ay.toFixed(1)}`);
         }
     });
-    // --- SVG 3: 24-Hour Work Hour Usage Chart ---
+    // --- SVG 3: History Comparison Graph A — Selected Month vs Previous Month Cumulative Pace (Days 1..31) ---
+    const maxCompareCum = Math.max(snap.totalMonthlyCredits * 1.05, snap.totalUsedCredits * 1.1, prevSnap.totalUsedCredits * 1.1, 10);
+    const day31Step = plotW / 31;
+    const selectedCumPoints = [];
+    const prevCumPoints = [];
+    const compareDayMarkersSvg = [];
+    for (let d = 1; d <= 31; d++) {
+        const cx = padL + (d - 0.5) * day31Step;
+        const prevPt = prevSnap.dailySeries[d - 1];
+        if (prevPt) {
+            const py = padT + plotH - (prevPt.cumulativeUsed / maxCompareCum) * plotH;
+            prevCumPoints.push(`${cx.toFixed(1)},${py.toFixed(1)}`);
+        }
+        const selPt = snap.dailySeries[d - 1];
+        if (selPt && !selPt.isFuture) {
+            const sy = padT + plotH - (selPt.cumulativeUsed / maxCompareCum) * plotH;
+            selectedCumPoints.push(`${cx.toFixed(1)},${sy.toFixed(1)}`);
+        }
+        if (d === 1 || d % 5 === 0 || d === 31) {
+            compareDayMarkersSvg.push(`<text x="${cx.toFixed(1)}" y="${chartH - 10}" text-anchor="middle" fill="#94a3b8" font-size="10">D${d}</text>`);
+        }
+    }
+    // --- SVG 4: History Comparison Graph B — 6-Month Historical Credits & Expensive Chats Bar Chart ---
+    const maxMonthHistoryCr = Math.max(...historyComp.monthsHistory.map(m => Math.max(m.totalMonthlyCredits, m.usedCredits)), 50);
+    const mCount = historyComp.monthsHistory.length;
+    const mStep = plotW / mCount;
+    const mBarW = Math.max(22, mStep * 0.48);
+    const multiMonthBarsSvg = historyComp.monthsHistory
+        .map((mh, idx) => {
+        const x = padL + idx * mStep + (mStep - mBarW) / 2;
+        const capH = (mh.totalMonthlyCredits / maxMonthHistoryCr) * plotH;
+        const capY = padT + plotH - capH;
+        const usedH = Math.max(mh.usedCredits > 0 ? 4 : 0, (mh.usedCredits / maxMonthHistoryCr) * plotH);
+        const usedY = padT + plotH - usedH;
+        const barColor = mh.usedPercent >= 100
+            ? '#ef4444'
+            : mh.usedPercent >= 85
+                ? '#f97316'
+                : mh.isSelected
+                    ? '#38bdf8'
+                    : '#22c55e';
+        const strokeAttr = mh.isSelected ? 'stroke="#f8fafc" stroke-width="2"' : '';
+        let expBadge = '';
+        if (mh.totalExpensiveChats > 0) {
+            const by = Math.max(14, usedY - 18);
+            expBadge = `
+          <rect x="${(x + mBarW / 2 - 18).toFixed(1)}" y="${(by - 9).toFixed(1)}" width="36" height="14" rx="7" fill="rgba(249,115,22,0.25)" stroke="#f97316" stroke-width="1" />
+          <text x="${(x + mBarW / 2).toFixed(1)}" y="${(by + 1).toFixed(1)}" text-anchor="middle" fill="#fb923c" font-size="9" font-weight="bold">🔥${mh.totalExpensiveChats}</text>
+        `;
+        }
+        return `
+        <g style="cursor:pointer;" onclick="selectMonth('${mh.monthKey}')">
+          <title>${mh.label}: ${mh.usedCredits.toFixed(1)} / ${mh.totalMonthlyCredits} cr (${mh.usedPercent.toFixed(1)}%) | Workday Avg: ${mh.workdayAverageCredits.toFixed(2)} cr/d | Expensive Chats: ${mh.totalExpensiveChats} (Click to inspect month)</title>
+          <!-- Background cap bar -->
+          <rect x="${x.toFixed(1)}" y="${capY.toFixed(1)}" width="${mBarW.toFixed(1)}" height="${capH.toFixed(1)}" rx="4" fill="rgba(148,163,184,0.12)" />
+          <!-- Used credits bar -->
+          <rect x="${x.toFixed(1)}" y="${usedY.toFixed(1)}" width="${mBarW.toFixed(1)}" height="${usedH.toFixed(1)}" rx="4" fill="${barColor}" ${strokeAttr} />
+          <text x="${(x + mBarW / 2).toFixed(1)}" y="${Math.max(12, usedY - 4).toFixed(1)}" text-anchor="middle" fill="#e2e8f0" font-size="10" font-weight="600">${mh.usedCredits.toFixed(0)} cr</text>
+          ${expBadge}
+          <text x="${(x + mBarW / 2).toFixed(1)}" y="${chartH - 10}" text-anchor="middle" fill="${mh.isSelected ? '#38bdf8' : '#94a3b8'}" font-size="10.5" font-weight="${mh.isSelected ? '700' : '500'}">${mh.label}</text>
+        </g>
+      `;
+    })
+        .join('');
+    // --- SVG 5: 24-Hour Work Hour Usage Chart ---
     const maxHourCr = Math.max(...snap.hourlySeries.map(h => h.credits), 2);
     const hrStep = plotW / 24;
     const hrBarW = Math.max(8, hrStep * 0.65);
@@ -564,7 +718,38 @@ function renderDashboardHtml(snap, config) {
       `;
     })
         .join('');
-    // Days that had expensive sessions
+    // History Table Rows (6 Months)
+    const historyTableRows = [...historyComp.monthsHistory]
+        .reverse()
+        .map(mh => {
+        const balColor = mh.endBalance >= 0 ? 'pill-green' : 'pill-red';
+        const balText = mh.endBalance >= 0 ? `+${mh.endBalance.toFixed(1)} Extra` : `${mh.endBalance.toFixed(1)} Debt`;
+        return `
+        <tr style="${mh.isSelected ? 'background:rgba(56,189,248,0.10);' : ''}">
+          <td>
+            <strong>${mh.label}</strong>
+            ${mh.isCurrentMonth ? '<span class="ws-tag" style="margin-left:6px;">Current</span>' : ''}
+            ${mh.isSelected ? '<span class="pill pill-green" style="margin-left:4px;">Viewing</span>' : ''}
+          </td>
+          <td>${mh.elapsedWorkdays} / ${mh.totalWorkdays} d</td>
+          <td><strong>${mh.usedCredits.toFixed(1)}</strong> / ${mh.totalMonthlyCredits} cr (${mh.usedPercent.toFixed(1)}%)</td>
+          <td><strong>${mh.workdayAverageCredits.toFixed(2)} cr/d</strong></td>
+          <td>${mh.workHourAverageCredits.toFixed(2)} cr/hr</td>
+          <td>
+            <span class="pill pill-orange">${mh.expensive40to60} (40-60%)</span>
+            <span class="pill pill-red">${mh.expensiveOver60} (&gt;60%)</span>
+          </td>
+          <td><code>${escapeHtml(mh.topModel)}</code></td>
+          <td><span class="pill ${balColor}">${balText}</span></td>
+          <td>
+            ${mh.isSelected
+            ? '<span class="muted">Selected</span>'
+            : `<button onclick="selectMonth('${mh.monthKey}')" style="padding:3px 8px;font-size:11px;">Inspect Month</button>`}
+          </td>
+        </tr>
+      `;
+    })
+        .join('');
     const expensiveDaysRows = snap.dailySeries
         .filter(d => d.totalExpensiveChats > 0)
         .sort((a, b) => b.dayOfMonth - a.dayOfMonth)
@@ -641,6 +826,12 @@ function renderDashboardHtml(snap, config) {
       </tr>
     `)
         .join('');
+    const monthOptionsHtml = historyComp.monthsHistory
+        .map(mh => `<option value="${mh.monthKey}" ${mh.isSelected ? 'selected' : ''}>${mh.label}${mh.isCurrentMonth ? ' (Current)' : ''}</option>`)
+        .reverse()
+        .join('');
+    const momDeltaSign = historyComp.momSameDayDeltaCredits >= 0 ? '+' : '';
+    const momDeltaColor = historyComp.momSameDayDeltaCredits > 0 ? 'var(--orange)' : 'var(--green)';
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -655,6 +846,7 @@ function renderDashboardHtml(snap, config) {
       --text: #f8fafc;
       --muted: #94a3b8;
       --accent: #38bdf8;
+      --purple: #a855f7;
       --green: #22c55e;
       --yellow: #eab308;
       --orange: #f97316;
@@ -685,8 +877,9 @@ function renderDashboardHtml(snap, config) {
       display: flex;
       align-items: center;
       gap: 10px;
+      flex-wrap: wrap;
     }
-    .btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn-group { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     button {
       background: #334155;
       color: #f8fafc;
@@ -700,6 +893,15 @@ function renderDashboardHtml(snap, config) {
     button:hover { background: #475569; }
     button.primary { background: #0284c7; border-color: #38bdf8; }
     button.primary:hover { background: #0369a1; }
+    .month-switcher {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: #1e293b;
+      border: 1px solid #475569;
+      padding: 4px 8px;
+      border-radius: 8px;
+    }
     .kpi-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -758,6 +960,8 @@ function renderDashboardHtml(snap, config) {
       display: flex;
       justify-content: space-between;
       align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
     }
     table {
       width: 100%;
@@ -830,30 +1034,41 @@ function renderDashboardHtml(snap, config) {
       <h1>
         <span>${snap.statusEmoji} Copilot Credit & Session Analytics</span>
         <span class="pill" style="background:${snap.colorHex}22;color:${snap.colorHex};border:1px solid ${snap.colorHex}66;">
-          Today: ${snap.activeDailyPercent.toFixed(1)}% (${snap.colorTier.toUpperCase()})
+          ${isViewingCurrentMonth ? 'Today' : snap.calendar.monthName}: ${snap.activeDailyPercent.toFixed(1)}% (${snap.colorTier.toUpperCase()})
         </span>
       </h1>
       <div class="muted" style="font-size:12px;margin-top:4px;">
-        ${snap.calendar.monthName} ${snap.calendar.year} · ${snap.calendar.totalWorkdays} Workdays (${snap.calendar.elapsedWorkdays} elapsed, ${snap.calendar.remainingWorkdays} remaining)
+        Viewing: <strong>${snap.calendar.monthName} ${snap.calendar.year}</strong> · ${snap.calendar.totalWorkdays} Workdays (${snap.calendar.elapsedWorkdays} elapsed, ${snap.calendar.remainingWorkdays} remaining)
+        ${!isViewingCurrentMonth ? ` · <span style="color:#facc15;">Historical Month View</span>` : ''}
         ${snap.apiQuota?.login ? ` · Signed in as <strong>@${escapeHtml(snap.apiQuota.login)}</strong> (${escapeHtml(snap.apiQuota.plan || 'Copilot')})` : ''}
       </div>
     </div>
+
     <div class="btn-group">
-      <button onclick="sendMsg({type:'seedDemo'})">✨ Load Sample Month Data</button>
-      <button onclick="sendMsg({type:'clearManual'})">🗑️ Clear Sample/Manual</button>
+      <!-- Month History Switcher -->
+      <div class="month-switcher">
+        <button onclick="stepMonth(-1)" title="Previous Month" style="padding:4px 8px;">◀ Prev</button>
+        <select id="monthSelect" onchange="selectMonth(this.value)" style="border:none;background:transparent;font-weight:700;">
+          ${monthOptionsHtml}
+        </select>
+        <button onclick="stepMonth(1)" title="Next Month" style="padding:4px 8px;" ${isViewingCurrentMonth ? 'disabled style="opacity:0.4;cursor:default;padding:4px 8px;"' : ''}>Next ▶</button>
+      </div>
+
+      <button onclick="sendMsg({type:'seedDemo'})">✨ Load Sample + History Data</button>
+      <button onclick="sendMsg({type:'clearManual'})">🗑️ Clear Sample</button>
       <button onclick="sendMsg({type:'export'})">📥 Export CSV / JSON</button>
-      <button class="primary" onclick="sendMsg({type:'refresh'})">🔄 Refresh Now</button>
+      <button class="primary" onclick="sendMsg({type:'refresh'})">🔄 Refresh</button>
     </div>
   </div>
 
-  <!-- 5 Core KPI Cards -->
+  <!-- 5 Core KPI Cards for Selected Month -->
   <div class="kpi-grid">
     <!-- 1. Daily Limit Status Box -->
     <div class="card" style="border-color:${snap.colorHex}88;">
-      <div class="card-title">1. Today's Daily Limit (${config.dailyPercentMode})</div>
+      <div class="card-title">1. ${isViewingCurrentMonth ? "Today's Daily Limit" : 'Last Day Limit'} (${config.dailyPercentMode})</div>
       <div class="big-num" style="color:${snap.colorHex};">
         ${snap.activeDailyPercent.toFixed(1)}%
-        <span style="font-size:14px;font-weight:500;color:var(--muted);">(${snap.todayUsedCredits.toFixed(2)} cr used)</span>
+        <span style="font-size:14px;font-weight:500;color:var(--muted);">(${snap.todayUsedCredits.toFixed(2)} cr)</span>
       </div>
       <div class="progress-track">
         <div class="progress-fill" style="width:${Math.min(100, snap.activeDailyPercent)}%;background:${snap.colorHex};"></div>
@@ -870,7 +1085,7 @@ function renderDashboardHtml(snap, config) {
 
     <!-- 2. Monthly Credits & Workdays -->
     <div class="card">
-      <div class="card-title">2. Monthly Credits & Workdays</div>
+      <div class="card-title">2. ${snap.calendar.monthName} Credits & Workdays</div>
       <div class="big-num">
         ${snap.totalUsedCredits.toFixed(1)} <span style="font-size:15px;color:var(--muted);">/ ${snap.totalMonthlyCredits} cr</span>
       </div>
@@ -878,12 +1093,12 @@ function renderDashboardHtml(snap, config) {
         <div class="progress-fill" style="width:${Math.min(100, snap.monthlyUsedPercent)}%;background:#38bdf8;"></div>
       </div>
       <div class="sub-row">
-        <span>Base + Extra Credits:</span>
-        <strong>${snap.baseMonthlyCredits} + ${snap.extraCredits} cr</strong>
+        <span>vs. ${historyComp.previousMonthLabel} (Day ${Math.min(snap.calendar.currentDay, prevSnap.calendar.daysInMonth)}):</span>
+        <strong style="color:${momDeltaColor};">${momDeltaSign}${historyComp.momSameDayDeltaCredits.toFixed(1)} cr (${momDeltaSign}${historyComp.momSameDayDeltaPercent.toFixed(0)}%)</strong>
       </div>
       <div class="sub-row">
         <span>Remaining Credits:</span>
-        <strong>${snap.remainingMonthlyCredits.toFixed(1)} cr (${snap.calendar.remainingWorkdays} workdays left)</strong>
+        <strong>${snap.remainingMonthlyCredits.toFixed(1)} cr (${snap.calendar.remainingWorkdays} workdays)</strong>
       </div>
     </div>
 
@@ -909,17 +1124,17 @@ function renderDashboardHtml(snap, config) {
 
     <!-- 4. Weekly / Workday / Work-Hour Averages -->
     <div class="card">
-      <div class="card-title">4. Usage Averages</div>
+      <div class="card-title">4. Usage Averages (${snap.calendar.monthName})</div>
       <div class="big-num" style="color:#38bdf8;">
         ${snap.workdayAverageCredits.toFixed(2)} <span style="font-size:14px;color:var(--muted);">cr / workday</span>
       </div>
       <div class="sub-row">
-        <span>Weekly Average (Last 7d: ${snap.last7DaysCredits.toFixed(1)} cr):</span>
+        <span>Weekly Average:</span>
         <strong>${snap.weeklyAverageCredits.toFixed(1)} cr/wk (${snap.weeklyAverageMessages.toFixed(0)} msgs)</strong>
       </div>
       <div class="sub-row">
-        <span>Work Day Average:</span>
-        <strong>${snap.workdayAverageCredits.toFixed(2)} cr/day (${snap.workdayAverageMessages.toFixed(1)} msgs)</strong>
+        <span>Work Day Avg (vs Prev Month):</span>
+        <strong>${snap.workdayAverageCredits.toFixed(2)} cr (${historyComp.momWorkdayAvgDeltaCredits >= 0 ? '+' : ''}${historyComp.momWorkdayAvgDeltaCredits.toFixed(2)})</strong>
       </div>
       <div class="sub-row">
         <span>Work Hour Average (${config.workHoursPerDay}h/day):</span>
@@ -929,9 +1144,10 @@ function renderDashboardHtml(snap, config) {
 
     <!-- 5. Expensive Chats Tracker (40-60% and >60%) -->
     <div class="card">
-      <div class="card-title">5. Expensive Chats (40–60%+ Daily Limit)</div>
+      <div class="card-title">5. Expensive Chats (40–60%+ Limit)</div>
       <div class="big-num" style="color:${snap.monthTotalExpensiveChats > 0 ? 'var(--orange)' : 'var(--green)'};">
-        ${snap.todayTotalExpensiveChats} Today <span style="font-size:14px;color:var(--muted);">/ ${snap.monthTotalExpensiveChats} Month</span>
+        ${snap.monthTotalExpensiveChats} in ${snap.calendar.monthName.slice(0, 3)}
+        <span style="font-size:14px;color:var(--muted);">(Prev: ${prevSnap.monthTotalExpensiveChats})</span>
       </div>
       <div class="sub-row">
         <span>40–60% Daily Limit Chats:</span>
@@ -948,15 +1164,14 @@ function renderDashboardHtml(snap, config) {
     </div>
   </div>
 
-  <!-- Interactive SVG Graphs -->
+  <!-- Selected Month Daily & Burn-Up Charts -->
   <div class="charts-grid">
     <div class="card">
       <div class="section-title">
-        <span>📊 Daily Credit Usage vs. Recommended Daily Limit (${snap.recommendedDailyLimit.toFixed(1)} cr)</span>
+        <span>📊 ${snap.calendar.monthName} Daily Usage vs. Daily Limit (${snap.recommendedDailyLimit.toFixed(1)} cr)</span>
         <span class="muted" style="font-size:11px;">Circles above bars = Expensive Chats (&ge;${config.expensiveSessionMinPercent}% limit)</span>
       </div>
       <svg viewBox="0 0 ${chartW} ${chartH}">
-        <!-- Horizontal Grid & Recommended Daily Limit Line -->
         <line x1="${padL}" y1="${padT + plotH}" x2="${chartW - padR}" y2="${padT + plotH}" stroke="#334155" stroke-width="1" />
         <line x1="${padL}" y1="${limitY.toFixed(1)}" x2="${chartW - padR}" y2="${limitY.toFixed(1)}" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="5,4" />
         <text x="${chartW - padR - 4}" y="${Math.max(12, limitY - 5).toFixed(1)}" text-anchor="end" fill="#38bdf8" font-size="10" font-weight="600">
@@ -968,7 +1183,7 @@ function renderDashboardHtml(snap, config) {
 
     <div class="card">
       <div class="section-title">
-        <span>📈 Cumulative Burn-Up vs. Workday Budget (Surplus / Debt)</span>
+        <span>📈 ${snap.calendar.monthName} Cumulative Burn-Up vs. Workday Budget</span>
         <span class="muted" style="font-size:11px;">Dashed = Ideal Workday Pace · Solid = Actual Used</span>
       </div>
       <svg viewBox="0 0 ${chartW} ${chartH}">
@@ -982,11 +1197,70 @@ function renderDashboardHtml(snap, config) {
     </div>
   </div>
 
+  <!-- NEW: History Comparison Graphs (Month-over-Month Pace & 6-Month Overview) -->
+  <div class="charts-grid">
+    <div class="card" style="border-color:rgba(168,85,247,0.45);">
+      <div class="section-title">
+        <span>🔄 History Comparison: ${snap.calendar.monthName} vs. ${historyComp.previousMonthLabel} Cumulative Pace</span>
+        <span class="muted" style="font-size:11px;">
+          <span style="color:#38bdf8;font-weight:700;">━ ${snap.calendar.monthName.slice(0, 3)} (${snap.totalUsedCredits.toFixed(1)} cr)</span> &nbsp;·&nbsp;
+          <span style="color:#a855f7;font-weight:700;">┅ ${historyComp.previousMonthLabel.slice(0, 3)} (${prevSnap.totalUsedCredits.toFixed(1)} cr)</span>
+        </span>
+      </div>
+      <svg viewBox="0 0 ${chartW} ${chartH}">
+        <line x1="${padL}" y1="${padT + plotH}" x2="${chartW - padR}" y2="${padT + plotH}" stroke="#334155" stroke-width="1" />
+        ${prevCumPoints.length > 1 ? `<polyline fill="none" stroke="#a855f7" stroke-width="2.2" stroke-dasharray="6,4" points="${prevCumPoints.join(' ')}" />` : ''}
+        ${selectedCumPoints.length > 1 ? `<polyline fill="none" stroke="#38bdf8" stroke-width="3" points="${selectedCumPoints.join(' ')}" />` : ''}
+        ${compareDayMarkersSvg.join('')}
+        <text x="${padL + 6}" y="${padT + 14}" fill="#cbd5e1" font-size="11">
+          Through Day ${Math.min(snap.calendar.currentDay, prevSnap.calendar.daysInMonth)}: ${snap.calendar.monthName.slice(0, 3)} = ${historyComp.sameDaySelectedCredits.toFixed(1)} cr vs ${historyComp.previousMonthLabel.slice(0, 3)} = ${historyComp.sameDayPreviousCredits.toFixed(1)} cr (${momDeltaSign}${historyComp.momSameDayDeltaCredits.toFixed(1)} cr)
+        </text>
+      </svg>
+    </div>
+
+    <div class="card" style="border-color:rgba(56,189,248,0.4);">
+      <div class="section-title">
+        <span>🗓️ 6-Month Credit History & Expensive Chats Comparison</span>
+        <span class="muted" style="font-size:11px;">Click any month bar to view its full report</span>
+      </div>
+      <svg viewBox="0 0 ${chartW} ${chartH}">
+        <line x1="${padL}" y1="${padT + plotH}" x2="${chartW - padR}" y2="${padT + plotH}" stroke="#334155" stroke-width="1" />
+        ${multiMonthBarsSvg}
+      </svg>
+    </div>
+  </div>
+
+  <!-- NEW: 6-Month Historical Statistics Table -->
+  <div class="card" style="margin-bottom:20px;">
+    <div class="section-title">
+      <span>📚 Multi-Month History & Previous Month Statistics</span>
+      <span class="muted" style="font-size:12px;">Compare monthly usage, workday averages, expensive sessions, and surplus/debt</span>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Month</th>
+          <th>Workdays</th>
+          <th>Credits Used / Cap</th>
+          <th>Workday Avg</th>
+          <th>Work Hour Avg</th>
+          <th>Expensive Chats</th>
+          <th>Top Model</th>
+          <th>End Balance</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${historyTableRows}
+      </tbody>
+    </table>
+  </div>
+
   <div class="charts-grid">
     <!-- 24-Hour Work Hour Activity -->
     <div class="card">
       <div class="section-title">
-        <span>⏰ Usage by Hour of Day (Work Hour Distribution)</span>
+        <span>⏰ ${snap.calendar.monthName} Usage by Hour of Day</span>
         <span class="muted" style="font-size:11px;">Active Coding Hour Avg: ${snap.activeHourAverageCredits.toFixed(2)} cr/hr</span>
       </div>
       <svg viewBox="0 0 ${chartW} ${chartH}">
@@ -998,7 +1272,7 @@ function renderDashboardHtml(snap, config) {
     <!-- Smart Insights & Recommendations -->
     <div class="card">
       <div class="section-title">
-        <span>💡 Smart Budget, Debt & Session Insights</span>
+        <span>💡 Smart Budget, Debt & Session Insights (${snap.calendar.monthName})</span>
       </div>
       <ul class="insights-list">
         ${snap.insights.map(item => `<li>${escapeHtml(item)}</li>`).join('')}
@@ -1009,7 +1283,7 @@ function renderDashboardHtml(snap, config) {
   <!-- Most Expensive Sessions Leaderboard -->
   <div class="card" style="margin-bottom:20px;">
     <div class="section-title">
-      <span>🔥 Most Expensive Chat Sessions Leaderboard</span>
+      <span>🔥 Most Expensive Chat Sessions (${snap.calendar.monthName} ${snap.calendar.year})</span>
       <span class="muted" style="font-size:12px;">
         Flags sessions using <strong>${config.expensiveSessionMinPercent}–${config.expensiveSessionMaxPercent}% (Heavy)</strong> or <strong>&gt;${config.expensiveSessionMaxPercent}% (Mega)</strong> of Daily Limit (${snap.recommendedDailyLimit.toFixed(2)} cr)
       </span>
@@ -1029,13 +1303,13 @@ function renderDashboardHtml(snap, config) {
             </thead>
             <tbody>${topSessionsRows}</tbody>
           </table>`
-        : `<div class="muted" style="padding:12px 0;">No chat sessions recorded for this month yet. Click <strong>"✨ Load Sample Month Data"</strong> above or log a session below to test!</div>`}
+        : `<div class="muted" style="padding:12px 0;">No chat sessions recorded for ${snap.calendar.monthName} ${snap.calendar.year}. Click <strong>"✨ Load Sample + History Data"</strong> above to populate current and past months!</div>`}
   </div>
 
   <!-- Daily Expensive Chats Breakdown -->
   <div class="card" style="margin-bottom:20px;">
     <div class="section-title">
-      <span>📅 Daily Expensive Chats Breakdown (Days with 40–60% or &gt;60% Daily Limit Sessions)</span>
+      <span>📅 Daily Expensive Chats Breakdown (${snap.calendar.monthName} — Days with 40–60% or &gt;60% Sessions)</span>
     </div>
     ${expensiveDaysRows
         ? `<table>
@@ -1051,14 +1325,14 @@ function renderDashboardHtml(snap, config) {
             </thead>
             <tbody>${expensiveDaysRows}</tbody>
           </table>`
-        : `<div class="muted" style="padding:8px 0;">No days have had a single session exceed ${config.expensiveSessionMinPercent}% of the daily limit yet.</div>`}
+        : `<div class="muted" style="padding:8px 0;">No days in ${snap.calendar.monthName} had a single session exceed ${config.expensiveSessionMinPercent}% of the daily limit.</div>`}
   </div>
 
   <!-- AI Models & Workspaces Side-by-Side -->
   <div class="charts-grid">
     <div class="card">
       <div class="section-title">
-        <span>🤖 AI Models Usage Breakdown</span>
+        <span>🤖 AI Models Usage Breakdown (${snap.calendar.monthName})</span>
         <span class="muted" style="font-size:11px;">Model Name · Messages · Credit Usage</span>
       </div>
       ${modelsRows
@@ -1075,12 +1349,12 @@ function renderDashboardHtml(snap, config) {
               </thead>
               <tbody>${modelsRows}</tbody>
             </table>`
-        : `<div class="muted">No model activity recorded yet.</div>`}
+        : `<div class="muted">No model activity recorded for ${snap.calendar.monthName}.</div>`}
     </div>
 
     <div class="card">
       <div class="section-title">
-        <span>📁 Workspace / Repository Cost Ranking</span>
+        <span>📁 Workspace / Repository Cost Ranking (${snap.calendar.monthName})</span>
         <span class="muted" style="font-size:11px;">Which projects spawn expensive chats</span>
       </div>
       ${workspaceRows
@@ -1096,7 +1370,7 @@ function renderDashboardHtml(snap, config) {
               </thead>
               <tbody>${workspaceRows}</tbody>
             </table>`
-        : `<div class="muted">No workspace activity recorded yet.</div>`}
+        : `<div class="muted">No workspace activity recorded for ${snap.calendar.monthName}.</div>`}
     </div>
   </div>
 
@@ -1164,6 +1438,12 @@ function renderDashboardHtml(snap, config) {
     const vscode = acquireVsCodeApi();
     function sendMsg(msg) {
       vscode.postMessage(msg);
+    }
+    function selectMonth(monthKey) {
+      vscode.postMessage({ type: 'selectMonth', monthKey });
+    }
+    function stepMonth(delta) {
+      vscode.postMessage({ type: 'stepMonth', delta });
     }
     function saveBudget() {
       vscode.postMessage({
