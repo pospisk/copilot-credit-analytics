@@ -1,8 +1,8 @@
 {
   "name": "copilot-credit-analytics",
   "displayName": "Copilot Credit & Token Analytics",
-  "description": "Monitors GitHub Copilot credit & token usage, calculates workday-based daily budgets, tracks extra credits & debt, identifies expensive 40-60%+ chat sessions, and visualizes model & daily analytics.",
-  "version": "0.2.0",
+  "description": "Monitors GitHub Copilot credit & token usage, calculates workday-based daily budgets, tracks extra credits & debt, identifies expensive 40-60%+ chat sessions, and visualizes model, workspace & multi-month history analytics.",
+  "version": "0.3.0",
   "publisher": "pospisk",
   "engines": {
     "vscode": "^1.85.0"
@@ -24,10 +24,6 @@
       {
         "command": "copilotAnalytics.setCredits",
         "title": "Copilot Analytics: Set Monthly & Extra Credits"
-      },
-      {
-        "command": "copilotAnalytics.logUsage",
-        "title": "Copilot Analytics: Log / Simulate Session Usage"
       },
       {
         "command": "copilotAnalytics.refresh",
@@ -100,6 +96,11 @@
           ],
           "description": "Determines whether the primary status bar % uses the debt/extra-adjusted daily limit or fixed base daily limit."
         },
+        "copilotAnalytics.colorStatusBarBackground": {
+          "type": "boolean",
+          "default": true,
+          "description": "Applies green, yellow, orange, or red background fill with high-contrast white/dark text to the bottom-right status bar widget."
+        },
         "copilotAnalytics.expensiveSessionMinPercent": {
           "type": "number",
           "default": 40,
@@ -113,21 +114,31 @@
         "copilotAnalytics.modelMultipliers": {
           "type": "object",
           "default": {
+            "claude-opus-4.6": 3,
             "claude-opus-4.5": 3,
             "claude-opus-4": 10,
+            "claude-sonnet-4.6": 1,
+            "claude-sonnet-4.5": 1,
+            "claude-sonnet-4": 1,
+            "claude-haiku-4.5": 0.33,
             "claude-3.7-sonnet-thought": 1.25,
+            "claude-3.7-sonnet-thinking": 1.25,
             "claude-3.7-sonnet": 1,
             "claude-3.5-sonnet": 1,
-            "claude-sonnet-4": 1,
+            "gemini-3-pro": 1,
             "gemini-2.5-pro": 1,
+            "gemini-2.5-flash": 0.33,
             "gemini-2.0-flash": 0.25,
             "o1": 10,
             "o3-mini": 0.33,
+            "o3": 1,
             "o4-mini": 0.33,
             "gpt-4.5": 50,
             "gpt-4.1": 0,
             "gpt-4o": 0,
             "gpt-5-mini": 0,
+            "gpt-5.2": 1,
+            "gpt-5.1": 1,
             "gpt-5": 1
           },
           "description": "Credit cost multiplier per message for each AI model substring."

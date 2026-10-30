@@ -35,67 +35,150 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.DEFAULT_MODEL_MULTIPLIERS = void 0;
 exports.formatDateYMD = formatDateYMD;
+exports.formatMonthKey = formatMonthKey;
+exports.getMonthShortLabel = getMonthShortLabel;
 exports.getColorInfo = getColorInfo;
+exports.normalizeModelName = normalizeModelName;
 exports.resolveModelMultiplier = resolveModelMultiplier;
 exports.getMonthWorkdays = getMonthWorkdays;
 exports.fetchCopilotInternalQuota = fetchCopilotInternalQuota;
+exports.getCandidateVSCodeUserDirs = getCandidateVSCodeUserDirs;
+exports.replayJsonlMutationLog = replayJsonlMutationLog;
+exports.mineAllChatSessionsByMonth = mineAllChatSessionsByMonth;
 exports.scanLocalChatSessions = scanLocalChatSessions;
 exports.computeAnalytics = computeAnalytics;
-exports.formatMonthKey = formatMonthKey;
-exports.getMonthShortLabel = getMonthShortLabel;
 exports.computeHistoryComparison = computeHistoryComparison;
 const fs = __importStar(require("fs"));
+const os = __importStar(require("os"));
 const path = __importStar(require("path"));
 const https = __importStar(require("https"));
 exports.DEFAULT_MODEL_MULTIPLIERS = {
+    'claude-opus-4.6-fast': 9,
+    'claude-opus-4.6': 3,
     'claude-opus-4.5': 3,
+    'claude-opus-4.1': 10,
     'claude-opus-4': 10,
+    'claude-sonnet-4.6': 1,
+    'claude-sonnet-4.5': 1,
+    'claude-sonnet-4': 1,
+    'claude-haiku-4.5': 0.33,
     'claude-3.7-sonnet-thought': 1.25,
     'claude-3.7-sonnet-thinking': 1.25,
     'claude-3.7-sonnet': 1,
     'claude-3.5-sonnet': 1,
-    'claude-sonnet-4': 1,
+    'claude-3.5-haiku': 0.33,
+    'gemini-3-pro': 1,
+    'gemini-3-flash': 0.33,
     'gemini-2.5-pro': 1,
+    'gemini-2.5-flash': 0.33,
     'gemini-2.0-flash': 0.25,
     'o1-preview': 10,
     'o1-mini': 3,
     'o1': 10,
+    'o3-pro': 10,
     'o3-mini': 0.33,
+    'o3': 1,
     'o4-mini': 0.33,
     'gpt-4.5': 50,
+    'gpt-4.1-mini': 0,
     'gpt-4.1': 0,
     'gpt-4o-mini': 0,
     'gpt-4o': 0,
     'gpt-5-mini': 0,
-    'gpt-5': 1
+    'gpt-5-codex': 1,
+    'gpt-5.2': 1,
+    'gpt-5.1': 1,
+    'gpt-5': 1,
+    'grok-code-fast': 0.25
 };
 const WEEKDAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTH_NAMES = [
     'January', 'February', 'March', 'April', 'May', 'June',
     'July', 'August', 'September', 'October', 'November', 'December'
 ];
+const MONTH_SHORT_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 function formatDateYMD(date) {
     const y = date.getFullYear();
     const m = String(date.getMonth() + 1).padStart(2, '0');
     const d = String(date.getDate()).padStart(2, '0');
     return `${y}-${m}-${d}`;
 }
+function formatMonthKey(year, month) {
+    return `${year}-${String(month + 1).padStart(2, '0')}`;
+}
+function getMonthShortLabel(year, month) {
+    return `${MONTH_SHORT_NAMES[month] || 'Mon'} ${year}`;
+}
+/**
+ * Returns full color specification for both charts and the bottom-right VS Code Status Bar widget
+ * (solid background fill + high-contrast white or dark text).
+ */
 function getColorInfo(percent, monthlyExhausted = false) {
     if (monthlyExhausted || percent >= 100) {
-        return { tier: 'red', hex: '#ef4444', emoji: '🔴', label: 'Over Limit' };
+        return {
+            tier: 'red',
+            bgHex: '#dc2626',
+            hoverBgHex: '#b91c1c',
+            fgHex: '#ffffff', // White text on crimson red
+            accentHex: '#ef4444',
+            emoji: '🔴',
+            label: 'Over Limit'
+        };
     }
     if (percent >= 85) {
-        return { tier: 'orange', hex: '#f97316', emoji: '🟠', label: 'Near Limit' };
+        return {
+            tier: 'orange',
+            bgHex: '#f97316',
+            hoverBgHex: '#ea580c',
+            fgHex: '#111827', // Dark text on vibrant orange
+            accentHex: '#f97316',
+            emoji: '🟠',
+            label: 'Near Limit'
+        };
     }
     if (percent >= 60) {
-        return { tier: 'yellow', hex: '#eab308', emoji: '🟡', label: 'Moderate' };
+        return {
+            tier: 'yellow',
+            bgHex: '#facc15',
+            hoverBgHex: '#eab308',
+            fgHex: '#111827', // Dark text on bright yellow
+            accentHex: '#eab308',
+            emoji: '🟡',
+            label: 'Moderate'
+        };
     }
-    return { tier: 'green', hex: '#22c55e', emoji: '🟢', label: 'Healthy' };
+    return {
+        tier: 'green',
+        bgHex: '#16a34a',
+        hoverBgHex: '#15803d',
+        fgHex: '#ffffff', // White text on emerald green
+        accentHex: '#22c55e',
+        emoji: '🟢',
+        label: 'Healthy'
+    };
+}
+function normalizeModelName(rawModel) {
+    if (!rawModel || typeof rawModel !== 'string') {
+        return 'claude-sonnet-4';
+    }
+    const cleaned = rawModel
+        .trim()
+        .replace(/^(copilot\/|copilot-|github\/|models\/|anthropic\/|openai\/|google\/|azure\/)/i, '')
+        .replace(/\(preview\)/gi, '')
+        .replace(/\s+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '')
+        .toLowerCase();
+    return cleaned || 'claude-sonnet-4';
 }
 function resolveModelMultiplier(modelName, customMap) {
-    const clean = (modelName || 'copilot-chat').toLowerCase().trim();
-    const map = { ...exports.DEFAULT_MODEL_MULTIPLIERS, ...(customMap || {}) };
-    // Sort keys by length descending so specific substrings ('claude-3.7-sonnet-thought') match before generic ('claude-3.7-sonnet')
+    const clean = normalizeModelName(modelName);
+    const map = { ...exports.DEFAULT_MODEL_MULTIPLIERS };
+    if (customMap) {
+        for (const [k, v] of Object.entries(customMap)) {
+            map[normalizeModelName(k)] = v;
+        }
+    }
     const keys = Object.keys(map).sort((a, b) => b.length - a.length);
     for (const key of keys) {
         if (clean.includes(key.toLowerCase())) {
@@ -152,6 +235,7 @@ function getMonthWorkdays(year, month, currentDay, workDays = [1, 2, 3, 4, 5], h
 }
 /**
  * Queries GitHub's internal Copilot user quota API using an OAuth token from VS Code's GitHub authentication provider.
+ * Note: GitHub's personal Copilot API returns ONLY aggregate monthly entitlement & used count (no daily/model/session breakdown).
  */
 function fetchCopilotInternalQuota(accessToken) {
     return new Promise((resolve) => {
@@ -159,7 +243,7 @@ function fetchCopilotInternalQuota(accessToken) {
             method: 'GET',
             headers: {
                 'Authorization': `Bearer ${accessToken}`,
-                'User-Agent': 'VSCode-Copilot-Credit-Analytics/1.0',
+                'User-Agent': 'VSCode-Copilot-Credit-Analytics/0.3',
                 'Accept': 'application/json'
             },
             timeout: 6000
@@ -210,8 +294,33 @@ function fetchCopilotInternalQuota(accessToken) {
     });
 }
 /**
- * Resolves a human-readable workspace/project name from a workspaceStorage hash directory.
+ * Discovers candidate VS Code User directories so local chat sessions are mined whether running
+ * in standard VS Code, VS Code Insiders, or an Extension Development Host.
  */
+function getCandidateVSCodeUserDirs(primaryUserDir) {
+    const dirs = new Set();
+    if (primaryUserDir && fs.existsSync(primaryUserDir)) {
+        dirs.add(primaryUserDir);
+    }
+    const home = os.homedir();
+    const platform = process.platform;
+    const standardRoots = [];
+    if (platform === 'darwin') {
+        standardRoots.push(path.join(home, 'Library', 'Application Support', 'Code', 'User'), path.join(home, 'Library', 'Application Support', 'Code - Insiders', 'User'));
+    }
+    else if (platform === 'win32' && process.env.APPDATA) {
+        standardRoots.push(path.join(process.env.APPDATA, 'Code', 'User'), path.join(process.env.APPDATA, 'Code - Insiders', 'User'));
+    }
+    else {
+        standardRoots.push(path.join(home, '.config', 'Code', 'User'), path.join(home, '.config', 'Code - Insiders', 'User'));
+    }
+    for (const r of standardRoots) {
+        if (fs.existsSync(r)) {
+            dirs.add(r);
+        }
+    }
+    return Array.from(dirs);
+}
 function readWorkspaceName(hashDir) {
     const wsJsonPath = path.join(hashDir, 'workspace.json');
     try {
@@ -220,7 +329,7 @@ function readWorkspaceName(hashDir) {
             const uriStr = content.folder || content.workspace || '';
             if (uriStr) {
                 const decoded = decodeURIComponent(uriStr.replace(/^file:\/\//, ''));
-                return path.basename(decoded) || 'Workspace';
+                return path.basename(decoded).replace(/\.code-workspace$/i, '') || 'Workspace';
             }
         }
     }
@@ -229,165 +338,234 @@ function readWorkspaceName(hashDir) {
     }
     return 'Workspace';
 }
+// --- VS Code .jsonl Object Mutation Log Replay Helpers (kind: 0, 1, 2, 3) ---
+function getByPath(root, keys) {
+    let curr = root;
+    for (const k of keys) {
+        if (curr === null || curr === undefined) {
+            return undefined;
+        }
+        curr = curr[k];
+    }
+    return curr;
+}
+function setByPath(root, keys, value) {
+    if (!root || keys.length === 0) {
+        return;
+    }
+    let curr = root;
+    for (let i = 0; i < keys.length - 1; i++) {
+        const k = keys[i];
+        if (curr[k] === null || curr[k] === undefined || typeof curr[k] !== 'object') {
+            curr[k] = typeof keys[i + 1] === 'number' ? [] : {};
+        }
+        curr = curr[k];
+    }
+    curr[keys[keys.length - 1]] = value;
+}
+function deleteByPath(root, keys) {
+    if (!root || keys.length === 0) {
+        return;
+    }
+    const parent = getByPath(root, keys.slice(0, -1));
+    if (parent && typeof parent === 'object') {
+        const last = keys[keys.length - 1];
+        if (Array.isArray(parent) && typeof last === 'number') {
+            parent.splice(last, 1);
+        }
+        else {
+            delete parent[last];
+        }
+    }
+}
 /**
- * Scans VS Code's local workspaceStorage directories for Copilot Chat session files (.json and .jsonl).
+ * Replays VS Code's objectMutationLog (.jsonl) format:
+ * - kind 0: initial full state snapshot under `v`
+ * - kind 1: set property at key-path `k` to `v`
+ * - kind 2: splice/truncate-and-append array at key-path `k` from index `i` with items `v`
+ * - kind 3: delete property at key-path `k`
+ * Also supports legacy flat JSONL lines containing `requests` or single prompt objects.
  */
-function scanLocalChatSessions(workspaceStorageRoot, year, month, multipliers) {
-    if (!workspaceStorageRoot || !fs.existsSync(workspaceStorageRoot)) {
-        return [];
-    }
-    const monthStartMs = new Date(year, month, 1, 0, 0, 0).getTime();
-    const monthEndMs = new Date(year, month + 1, 0, 23, 59, 59, 999).getTime();
-    const sessions = [];
-    let hashDirs = [];
-    try {
-        hashDirs = fs.readdirSync(workspaceStorageRoot).map(name => path.join(workspaceStorageRoot, name));
-    }
-    catch {
-        return [];
-    }
-    for (const hashDir of hashDirs) {
-        const chatSessionsDir = path.join(hashDir, 'chatSessions');
-        if (!fs.existsSync(chatSessionsDir)) {
+function replayJsonlMutationLog(rawContent) {
+    const lines = rawContent.split(/\r?\n/);
+    let state = undefined;
+    const looseRequests = [];
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) {
             continue;
         }
-        let files = [];
+        let obj;
         try {
-            files = fs.readdirSync(chatSessionsDir).filter(f => f.endsWith('.json') || f.endsWith('.jsonl'));
+            obj = JSON.parse(trimmed);
         }
         catch {
             continue;
         }
-        if (files.length === 0) {
-            continue;
-        }
-        const workspaceName = readWorkspaceName(hashDir);
-        for (const file of files) {
-            const fullPath = path.join(chatSessionsDir, file);
-            let stat;
-            try {
-                stat = fs.statSync(fullPath);
+        if (typeof obj.kind === 'number') {
+            if (obj.kind === 0 && obj.v && typeof obj.v === 'object') {
+                state = obj.v;
             }
-            catch {
-                continue;
+            else if (obj.kind === 1 && state && Array.isArray(obj.k) && obj.k.length > 0) {
+                setByPath(state, obj.k, obj.v);
             }
-            // Skip files not modified since the start of the target month
-            if (stat.mtimeMs < monthStartMs) {
-                continue;
-            }
-            try {
-                const parsed = file.endsWith('.jsonl')
-                    ? parseChatSessionJsonl(fullPath, workspaceName, stat.mtimeMs, multipliers)
-                    : parseChatSessionJson(fullPath, workspaceName, stat.mtimeMs, multipliers);
-                if (parsed && parsed.messages > 0 && parsed.startTime >= monthStartMs && parsed.startTime <= monthEndMs) {
-                    sessions.push(parsed);
+            else if (obj.kind === 2 && state) {
+                const hasPath = Array.isArray(obj.k) && obj.k.length > 0;
+                let target = hasPath ? getByPath(state, obj.k) : state;
+                if (!Array.isArray(target) && hasPath) {
+                    target = [];
+                    setByPath(state, obj.k, target);
+                }
+                if (Array.isArray(target)) {
+                    const items = Array.isArray(obj.v) ? obj.v : (obj.v !== undefined ? [obj.v] : []);
+                    if (typeof obj.i === 'number' && obj.i >= 0) {
+                        target.splice(obj.i, Math.max(0, target.length - obj.i), ...items);
+                    }
+                    else {
+                        target.push(...items);
+                    }
                 }
             }
-            catch {
-                // Ignore unreadable/partial session files
+            else if (obj.kind === 3 && state && Array.isArray(obj.k) && obj.k.length > 0) {
+                deleteByPath(state, obj.k);
             }
         }
+        else if (Array.isArray(obj.requests)) {
+            state = obj;
+        }
+        else if (obj.requestId || obj.message || obj.prompt) {
+            looseRequests.push(obj);
+        }
     }
-    return sessions;
-}
-function normalizeModelName(rawModel) {
-    if (!rawModel || typeof rawModel !== 'string') {
-        return 'claude-3.7-sonnet';
+    if (!state && looseRequests.length > 0) {
+        return { requests: looseRequests };
     }
-    return rawModel
-        .replace(/^copilot\//i, '')
-        .replace(/^github\//i, '')
-        .replace(/^models\//i, '')
-        .trim();
+    return state;
 }
-function buildSessionRecordFromTurns(sessionId, title, workspaceName, turns) {
-    if (turns.length === 0) {
+function extractTextLength(node, depth = 0) {
+    if (!node || depth > 4) {
+        return 0;
+    }
+    if (typeof node === 'string') {
+        return node.length;
+    }
+    if (Array.isArray(node)) {
+        let sum = 0;
+        for (const item of node) {
+            sum += extractTextLength(item, depth + 1);
+        }
+        return sum;
+    }
+    if (typeof node === 'object') {
+        let sum = 0;
+        if (typeof node.value === 'string') {
+            sum += node.value.length;
+        }
+        else if (node.value) {
+            sum += extractTextLength(node.value, depth + 1);
+        }
+        if (typeof node.text === 'string') {
+            sum += node.text.length;
+        }
+        if (node.content) {
+            sum += extractTextLength(node.content, depth + 1);
+        }
+        return sum;
+    }
+    return 0;
+}
+function extractModelAndMultiplier(req, sessionState, customMultipliers) {
+    let explicitMultiplier;
+    let modelCandidate = '';
+    const detailsStr = typeof req?.result?.details === 'string' ? req.result.details.trim() : '';
+    if (detailsStr) {
+        // Parse Copilot Chat footer strings like "Claude Sonnet 4 • 1x" or "GPT-4.1 • 0x"
+        const multMatch = detailsStr.match(/(?:[•·|-]|\()\s*(\d+(?:\.\d+)?)\s*x\b/i);
+        if (multMatch) {
+            explicitMultiplier = parseFloat(multMatch[1]);
+        }
+        const modelPart = detailsStr
+            .replace(/(?:[•·|-]|\()?\s*\d+(?:\.\d+)?\s*x\)?.*$/i, '')
+            .trim();
+        if (modelPart) {
+            modelCandidate = normalizeModelName(modelPart);
+        }
+    }
+    if (!modelCandidate) {
+        const rawId = req?.result?.metadata?.modelId ||
+            req?.result?.metadata?.model ||
+            req?.modelId ||
+            req?.selectedModel?.metadata?.id ||
+            req?.selectedModel?.metadata?.name ||
+            req?.selectedModel?.identifier ||
+            sessionState?.inputState?.selectedModel?.metadata?.id ||
+            sessionState?.inputState?.selectedModel?.metadata?.name ||
+            sessionState?.inputState?.selectedModel?.identifier ||
+            sessionState?.selectedModel?.metadata?.id ||
+            sessionState?.selectedModel?.identifier ||
+            '';
+        modelCandidate = normalizeModelName(rawId);
+    }
+    // Allow user overrides in copilotAnalytics.modelMultipliers to take priority if explicitly configured
+    const cleanUserOverrides = {};
+    for (const [k, v] of Object.entries(customMultipliers || {})) {
+        cleanUserOverrides[normalizeModelName(k)] = v;
+    }
+    const hasExplicitUserOverride = Object.keys(cleanUserOverrides).some(k => modelCandidate.includes(k) && exports.DEFAULT_MODEL_MULTIPLIERS[k] !== cleanUserOverrides[k]);
+    const multiplier = !hasExplicitUserOverride && explicitMultiplier !== undefined && !isNaN(explicitMultiplier)
+        ? explicitMultiplier
+        : resolveModelMultiplier(modelCandidate, customMultipliers);
+    return { model: modelCandidate, multiplier };
+}
+function parseSessionObject(state, fallbackSessionId, workspaceName, fallbackMtimeMs, multipliers) {
+    if (!state || typeof state !== 'object') {
         return undefined;
     }
-    turns.sort((a, b) => a.timestamp - b.timestamp);
-    const startTime = turns[0].timestamp;
-    const endTime = turns[turns.length - 1].timestamp;
-    const durationMinutes = Math.max(1, Math.round((endTime - startTime) / 60000));
-    const dateStr = turns[0].dateStr;
-    let credits = 0;
-    let directTokens = 0;
-    let cumulativeContextTokens = 0;
-    let runningThreadTokens = 0;
-    let post20TurnCredits = 0;
-    const modelsUsed = {};
-    turns.forEach((t, idx) => {
-        credits += t.credits;
-        directTokens += t.estimatedTokens;
-        // Each turn in a chat session re-sends prior conversation context
-        runningThreadTokens += t.estimatedTokens;
-        cumulativeContextTokens += runningThreadTokens;
-        if (idx >= 20) {
-            post20TurnCredits += t.credits;
-        }
-        if (!modelsUsed[t.model]) {
-            modelsUsed[t.model] = { messages: 0, credits: 0 };
-        }
-        modelsUsed[t.model].messages += 1;
-        modelsUsed[t.model].credits = Math.round((modelsUsed[t.model].credits + t.credits) * 100) / 100;
-    });
-    const primaryModel = Object.entries(modelsUsed)
-        .sort((a, b) => b[1].credits - a[1].credits || b[1].messages - a[1].messages)[0]?.[0] || 'claude-3.7-sonnet';
-    const hasContextBloat = turns.length > 20 || cumulativeContextTokens > 60000;
-    return {
-        sessionId,
-        title: title.slice(0, 90),
-        workspaceName,
-        dateStr,
-        startTime,
-        endTime,
-        durationMinutes,
-        messages: turns.length,
-        credits: Math.round(credits * 100) / 100,
-        estimatedTokens: directTokens,
-        cumulativeContextTokens,
-        modelsUsed,
-        primaryModel,
-        dailyLimitPercent: 0, // populated during computeAnalytics once daily limit is known
-        expenseTier: 'normal',
-        hasContextBloat,
-        post20TurnCredits: Math.round(post20TurnCredits * 100) / 100
-    };
-}
-function parseChatSessionJson(filePath, workspaceName, fallbackMtimeMs, multipliers) {
-    const raw = fs.readFileSync(filePath, 'utf8');
-    const data = JSON.parse(raw);
-    const requests = Array.isArray(data?.requests) ? data.requests : [];
+    const requests = Array.isArray(state.requests) ? state.requests : [];
     if (requests.length === 0) {
         return undefined;
     }
-    const sessionId = data.sessionId || path.basename(filePath, '.json');
-    let title = data.customTitle || '';
+    const sessionId = String(state.sessionId || fallbackSessionId);
+    let title = String(state.customTitle || state.computedTitle || '').trim();
+    const baseCreationMs = typeof state.creationDate === 'number' && state.creationDate > 1000000000000
+        ? state.creationDate
+        : fallbackMtimeMs - requests.length * 45000;
     const turns = [];
     requests.forEach((req, idx) => {
-        const promptText = typeof req?.message === 'string'
+        if (!req || req.isCanceled) {
+            return;
+        }
+        const promptText = typeof req.message === 'string'
             ? req.message
-            : (req?.message?.text || req?.message?.parts?.map((p) => p.text || '').join(' ') || '');
+            : (req.message?.text ||
+                (Array.isArray(req.message?.parts)
+                    ? req.message.parts.map((p) => p?.text || '').join(' ')
+                    : '') ||
+                req.prompt ||
+                '');
         if (!title && promptText) {
             title = promptText.replace(/\s+/g, ' ').trim();
         }
-        const respArray = Array.isArray(req?.response) ? req.response : [];
-        const responseText = respArray
-            .map(r => (typeof r?.value === 'string' ? r.value : (r?.content?.value || '')))
-            .join(' ');
-        const modelRaw = req?.modelId ||
-            req?.result?.metadata?.modelId ||
-            req?.selectedModel?.identifier ||
-            data?.selectedModel?.identifier ||
-            'claude-3.7-sonnet';
-        const model = normalizeModelName(modelRaw);
-        const multiplier = resolveModelMultiplier(model, multipliers);
-        const ts = typeof req?.timestamp === 'number'
+        const responseChars = extractTextLength(req.response);
+        const toolRoundChars = Array.isArray(req.result?.metadata?.toolCallRounds)
+            ? extractTextLength(req.result.metadata.toolCallRounds)
+            : 0;
+        const { model, multiplier } = extractModelAndMultiplier(req, state, multipliers);
+        const ts = typeof req.timestamp === 'number' && req.timestamp > 1000000000000
             ? req.timestamp
-            : (typeof data?.creationDate === 'number' ? data.creationDate + idx * 45000 : fallbackMtimeMs);
+            : (typeof req.requestDate === 'number' && req.requestDate > 1000000000000
+                ? req.requestDate
+                : baseCreationMs + idx * 45000);
         const dt = new Date(ts);
-        const promptChars = promptText.length;
-        const responseChars = responseText.length;
-        const estimatedTokens = Math.max(50, Math.ceil((promptChars + responseChars) / 4));
+        const usageMeta = req.result?.metadata?.usage || req.usage;
+        const exactTokens = typeof usageMeta?.totalTokens === 'number'
+            ? usageMeta.totalTokens
+            : (typeof usageMeta?.promptTokens === 'number' || typeof usageMeta?.completionTokens === 'number'
+                ? (usageMeta.promptTokens || 0) + (usageMeta.completionTokens || 0)
+                : 0);
+        const estimatedTokens = exactTokens > 0
+            ? exactTokens
+            : Math.max(60, Math.ceil((promptText.length + responseChars + toolRoundChars) / 4));
         turns.push({
             timestamp: ts,
             dateStr: formatDateYMD(dt),
@@ -395,63 +573,228 @@ function parseChatSessionJson(filePath, workspaceName, fallbackMtimeMs, multipli
             model,
             multiplier,
             credits: multiplier,
-            promptChars,
-            responseChars,
+            promptChars: promptText.length,
+            responseChars: responseChars + toolRoundChars,
             estimatedTokens,
-            promptPreview: promptText.slice(0, 80)
+            promptPreview: promptText.slice(0, 90)
         });
     });
-    return buildSessionRecordFromTurns(sessionId, title || 'Copilot Chat Session', workspaceName, turns);
+    if (turns.length === 0) {
+        return undefined;
+    }
+    return {
+        sessionId,
+        title: (title || 'Copilot Chat Session').slice(0, 95),
+        workspaceName,
+        turns
+    };
 }
-function parseChatSessionJsonl(filePath, workspaceName, fallbackMtimeMs, multipliers) {
-    const lines = fs.readFileSync(filePath, 'utf8').split('\n').filter(Boolean);
-    const sessionId = path.basename(filePath, '.jsonl');
-    let title = '';
-    const turns = [];
-    lines.forEach((line, idx) => {
-        try {
-            const obj = JSON.parse(line);
-            if (obj.customTitle && !title) {
-                title = obj.customTitle;
+function buildMonthlySessionRecord(sessionId, title, workspaceName, monthTurns, totalHistoricalTurnsBeforeMonth = 0) {
+    if (monthTurns.length === 0) {
+        return undefined;
+    }
+    const sorted = [...monthTurns].sort((a, b) => a.timestamp - b.timestamp);
+    const startTime = sorted[0].timestamp;
+    const endTime = sorted[sorted.length - 1].timestamp;
+    const durationMinutes = Math.max(1, Math.round((endTime - startTime) / 60000));
+    let credits = 0;
+    let directTokens = 0;
+    let cumulativeContextTokens = 0;
+    let runningThreadTokens = totalHistoricalTurnsBeforeMonth * 800;
+    let post20TurnCredits = 0;
+    const modelsUsed = {};
+    const creditsByDay = {};
+    sorted.forEach((t, idx) => {
+        credits += t.credits;
+        directTokens += t.estimatedTokens;
+        runningThreadTokens += t.estimatedTokens;
+        cumulativeContextTokens += runningThreadTokens;
+        const globalTurnIndex = totalHistoricalTurnsBeforeMonth + idx;
+        if (globalTurnIndex >= 20) {
+            post20TurnCredits += t.credits;
+        }
+        if (!modelsUsed[t.model]) {
+            modelsUsed[t.model] = { messages: 0, credits: 0 };
+        }
+        modelsUsed[t.model].messages += 1;
+        modelsUsed[t.model].credits = Math.round((modelsUsed[t.model].credits + t.credits) * 100) / 100;
+        creditsByDay[t.dateStr] = (creditsByDay[t.dateStr] || 0) + t.credits;
+    });
+    // Primary date within this month is the date with the highest credit spend (or first date if 0x model)
+    const primaryDateStr = Object.entries(creditsByDay).sort((a, b) => b[1] - a[1])[0]?.[0] || sorted[0].dateStr;
+    const primaryModel = Object.entries(modelsUsed).sort((a, b) => b[1].credits - a[1].credits || b[1].messages - a[1].messages)[0]?.[0] ||
+        'claude-sonnet-4';
+    const totalThreadTurns = totalHistoricalTurnsBeforeMonth + sorted.length;
+    const hasContextBloat = totalThreadTurns > 20 || cumulativeContextTokens > 60000;
+    return {
+        sessionId,
+        title,
+        workspaceName,
+        dateStr: primaryDateStr,
+        startTime,
+        endTime,
+        durationMinutes,
+        messages: sorted.length,
+        credits: Math.round(credits * 100) / 100,
+        estimatedTokens: directTokens,
+        cumulativeContextTokens,
+        modelsUsed,
+        primaryModel,
+        dailyLimitPercent: 0,
+        expenseTier: 'normal',
+        hasContextBloat,
+        post20TurnCredits: Math.round(post20TurnCredits * 100) / 100,
+        turns: sorted
+    };
+}
+/**
+ * Collects all chat session files (.jsonl and .json) from workspaceStorage and globalStorage/emptyWindowChatSessions
+ * across one or more VS Code User directories, deduplicated by sessionId, and buckets them by YYYY-MM month key.
+ */
+function mineAllChatSessionsByMonth(userDirs, earliestTimestampMs, multipliers) {
+    const sessionFiles = [];
+    for (const userDir of userDirs) {
+        if (!userDir || !fs.existsSync(userDir)) {
+            continue;
+        }
+        // 1. workspaceStorage/<hash>/chatSessions
+        const wsRoot = path.join(userDir, 'workspaceStorage');
+        if (fs.existsSync(wsRoot)) {
+            let hashEntries = [];
+            try {
+                hashEntries = fs.readdirSync(wsRoot);
             }
-            // Handle either embedded request objects or single line events
-            const reqs = Array.isArray(obj.requests) ? obj.requests : (obj.message || obj.prompt ? [obj] : []);
-            for (const req of reqs) {
-                const promptText = typeof req?.message === 'string'
-                    ? req.message
-                    : (req?.message?.text || req?.prompt || '');
-                if (!title && promptText) {
-                    title = promptText.replace(/\s+/g, ' ').trim();
+            catch {
+                hashEntries = [];
+            }
+            for (const hashName of hashEntries) {
+                const hashDir = path.join(wsRoot, hashName);
+                const chatDir = path.join(hashDir, 'chatSessions');
+                if (!fs.existsSync(chatDir)) {
+                    continue;
                 }
-                const model = normalizeModelName(req?.modelId || req?.model || obj?.modelId || 'claude-3.7-sonnet');
-                const multiplier = resolveModelMultiplier(model, multipliers);
-                const ts = typeof req?.timestamp === 'number' ? req.timestamp : fallbackMtimeMs + idx * 30000;
-                const dt = new Date(ts);
-                const responseChars = typeof req?.response === 'string' ? req.response.length : 600;
-                const estimatedTokens = Math.max(50, Math.ceil((promptText.length + responseChars) / 4));
-                turns.push({
-                    timestamp: ts,
-                    dateStr: formatDateYMD(dt),
-                    hour: dt.getHours(),
-                    model,
-                    multiplier,
-                    credits: multiplier,
-                    promptChars: promptText.length,
-                    responseChars,
-                    estimatedTokens
-                });
+                let files = [];
+                try {
+                    files = fs.readdirSync(chatDir).filter(f => f.endsWith('.jsonl') || f.endsWith('.json'));
+                }
+                catch {
+                    continue;
+                }
+                if (files.length === 0) {
+                    continue;
+                }
+                const wsName = readWorkspaceName(hashDir);
+                for (const f of files) {
+                    const fp = path.join(chatDir, f);
+                    try {
+                        const st = fs.statSync(fp);
+                        if (st.mtimeMs >= earliestTimestampMs) {
+                            sessionFiles.push({ fullPath: fp, workspaceName: wsName, mtimeMs: st.mtimeMs });
+                        }
+                    }
+                    catch {
+                        // ignore
+                    }
+                }
+            }
+        }
+        // 2. globalStorage/emptyWindowChatSessions
+        const emptyChatDirs = [path.join(userDir, 'globalStorage', 'emptyWindowChatSessions')];
+        const profilesDir = path.join(userDir, 'profiles');
+        if (fs.existsSync(profilesDir)) {
+            try {
+                for (const prof of fs.readdirSync(profilesDir)) {
+                    emptyChatDirs.push(path.join(profilesDir, prof, 'globalStorage', 'emptyWindowChatSessions'));
+                }
+            }
+            catch {
+                // ignore
+            }
+        }
+        for (const emptyDir of emptyChatDirs) {
+            if (!fs.existsSync(emptyDir)) {
+                continue;
+            }
+            try {
+                const files = fs.readdirSync(emptyDir).filter(f => f.endsWith('.jsonl') || f.endsWith('.json'));
+                for (const f of files) {
+                    const fp = path.join(emptyDir, f);
+                    const st = fs.statSync(fp);
+                    if (st.mtimeMs >= earliestTimestampMs) {
+                        sessionFiles.push({ fullPath: fp, workspaceName: 'Empty Window', mtimeMs: st.mtimeMs });
+                    }
+                }
+            }
+            catch {
+                // ignore
+            }
+        }
+    }
+    // Parse and deduplicate by sessionId (prefer version with more turns / newer mtime)
+    const parsedById = new Map();
+    for (const item of sessionFiles) {
+        try {
+            const raw = fs.readFileSync(item.fullPath, 'utf8');
+            const baseId = path.basename(item.fullPath).replace(/\.(jsonl|json)$/i, '');
+            const state = item.fullPath.endsWith('.jsonl')
+                ? replayJsonlMutationLog(raw)
+                : JSON.parse(raw);
+            const parsed = parseSessionObject(state, baseId, item.workspaceName, item.mtimeMs, multipliers);
+            if (!parsed || parsed.turns.length === 0) {
+                continue;
+            }
+            const prev = parsedById.get(parsed.sessionId);
+            if (!prev || parsed.turns.length > prev.turns.length || item.mtimeMs > prev.mtimeMs) {
+                parsedById.set(parsed.sessionId, { ...parsed, mtimeMs: item.mtimeMs });
             }
         }
         catch {
-            // skip malformed line
+            // Ignore unreadable or empty file
         }
-    });
-    return buildSessionRecordFromTurns(sessionId, title || 'Copilot Session', workspaceName, turns);
+    }
+    // Group turns per session into YYYY-MM buckets
+    const byMonth = {};
+    for (const session of parsedById.values()) {
+        const sortedTurns = [...session.turns].sort((a, b) => a.timestamp - b.timestamp);
+        const monthTurnGroups = new Map();
+        sortedTurns.forEach((turn, idx) => {
+            const mKey = turn.dateStr.slice(0, 7); // YYYY-MM
+            let grp = monthTurnGroups.get(mKey);
+            if (!grp) {
+                grp = { turns: [], priorCount: idx };
+                monthTurnGroups.set(mKey, grp);
+            }
+            grp.turns.push(turn);
+        });
+        for (const [mKey, grp] of monthTurnGroups.entries()) {
+            const rec = buildMonthlySessionRecord(session.sessionId, session.title, session.workspaceName, grp.turns, grp.priorCount);
+            if (rec) {
+                if (!byMonth[mKey]) {
+                    byMonth[mKey] = [];
+                }
+                byMonth[mKey].push(rec);
+            }
+        }
+    }
+    return byMonth;
+}
+/**
+ * Convenience single-month scanner (takes a workspaceStorageRoot directory or parent User directory).
+ */
+function scanLocalChatSessions(storagePath, year, month, multipliers) {
+    if (!storagePath || !fs.existsSync(storagePath)) {
+        return [];
+    }
+    // Accept either `<User>/workspaceStorage` or `<User>`
+    const userDir = path.basename(storagePath) === 'workspaceStorage' ? path.dirname(storagePath) : storagePath;
+    const monthStartMs = new Date(year, month, 1, 0, 0, 0).getTime();
+    const byMonth = mineAllChatSessionsByMonth([userDir], monthStartMs, multipliers);
+    return byMonth[formatMonthKey(year, month)] || [];
 }
 /**
  * Core pure calculation engine producing the complete AnalyticsSnapshot.
  */
-function computeAnalytics(config, now, sessionsInput, apiQuota) {
+function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger) {
     const year = now.getFullYear();
     const month = now.getMonth();
     const currentDay = now.getDate();
@@ -484,11 +827,11 @@ function computeAnalytics(config, now, sessionsInput, apiQuota) {
             expenseTier
         };
     });
-    // Aggregate session credits & messages per day, per hour, per model, and per workspace
+    // Aggregate daily, hourly, model, and workspace metrics
     const dailyMap = {};
     for (let d = 1; d <= calendar.daysInMonth; d++) {
         const ds = formatDateYMD(new Date(year, month, d));
-        dailyMap[ds] = { credits: 0, messages: 0, sessionsCount: 0, exp40to60: 0, expOver60: 0 };
+        dailyMap[ds] = { credits: 0, messages: 0, sessionIds: new Set(), exp40to60: 0, expOver60: 0 };
     }
     const hourlyCredits = new Array(24).fill(0);
     const hourlyMessages = new Array(24).fill(0);
@@ -505,26 +848,47 @@ function computeAnalytics(config, now, sessionsInput, apiQuota) {
             contextBloatSessionsCount++;
             contextBloatCreditsWasted += s.post20TurnCredits > 0 ? s.post20TurnCredits : s.credits * 0.25;
         }
-        const dayBucket = dailyMap[s.dateStr];
-        if (dayBucket) {
-            dayBucket.credits += s.credits;
-            dayBucket.messages += s.messages;
-            dayBucket.sessionsCount += 1;
-            if (s.expenseTier === 'heavy-40-60') {
-                dayBucket.exp40to60 += 1;
-            }
-            else if (s.expenseTier === 'mega-60plus') {
-                dayBucket.expOver60 += 1;
-            }
-            if (!dayBucket.topSessionPercent || s.dailyLimitPercent > dayBucket.topSessionPercent) {
-                dayBucket.topSessionPercent = s.dailyLimitPercent;
-                dayBucket.topSessionTitle = s.title;
+        // Attribute turn-level timestamps accurately to their exact day and hour
+        if (Array.isArray(s.turns) && s.turns.length > 0) {
+            for (const t of s.turns) {
+                const bucket = dailyMap[t.dateStr];
+                if (bucket) {
+                    bucket.credits += t.credits;
+                    bucket.messages += 1;
+                    bucket.sessionIds.add(s.sessionId);
+                }
+                if (t.hour >= 0 && t.hour < 24) {
+                    hourlyCredits[t.hour] += t.credits;
+                    hourlyMessages[t.hour] += 1;
+                }
             }
         }
-        const hr = new Date(s.startTime).getHours();
-        if (hr >= 0 && hr < 24) {
-            hourlyCredits[hr] += s.credits;
-            hourlyMessages[hr] += s.messages;
+        else {
+            const bucket = dailyMap[s.dateStr];
+            if (bucket) {
+                bucket.credits += s.credits;
+                bucket.messages += s.messages;
+                bucket.sessionIds.add(s.sessionId);
+            }
+            const hr = new Date(s.startTime).getHours();
+            if (hr >= 0 && hr < 24) {
+                hourlyCredits[hr] += s.credits;
+                hourlyMessages[hr] += s.messages;
+            }
+        }
+        // Attribute session-level expensive chat markers to the session's primary day
+        const primaryDayBucket = dailyMap[s.dateStr];
+        if (primaryDayBucket) {
+            if (s.expenseTier === 'heavy-40-60') {
+                primaryDayBucket.exp40to60 += 1;
+            }
+            else if (s.expenseTier === 'mega-60plus') {
+                primaryDayBucket.expOver60 += 1;
+            }
+            if (!primaryDayBucket.topSessionPercent || s.dailyLimitPercent > primaryDayBucket.topSessionPercent) {
+                primaryDayBucket.topSessionPercent = s.dailyLimitPercent;
+                primaryDayBucket.topSessionTitle = s.title;
+            }
         }
         // Models inside session
         for (const [modelName, mStats] of Object.entries(s.modelsUsed)) {
@@ -542,7 +906,7 @@ function computeAnalytics(config, now, sessionsInput, apiQuota) {
             modelAgg[modelName].tokens += Math.round(s.estimatedTokens * share);
         }
         // Workspace aggregation
-        const ws = s.workspaceName || 'Default Workspace';
+        const ws = s.workspaceName || 'Workspace';
         if (!workspaceAgg[ws]) {
             workspaceAgg[ws] = {
                 workspaceName: ws,
@@ -567,35 +931,41 @@ function computeAnalytics(config, now, sessionsInput, apiQuota) {
             workspaceAgg[ws].totalExpensiveChats += 1;
         }
     }
-    // Reconcile total used credits if GitHub API reports higher total usage than local chat files
-    const totalUsedCredits = apiQuota && apiQuota.used > sessionsTotalCredits
+    // Supplement daily credits from persistent daily API quota ledger if a day had non-chat external API usage
+    if (dailyQuotaLedger) {
+        const sortedDates = Object.keys(dailyQuotaLedger).sort();
+        for (let i = 1; i < sortedDates.length; i++) {
+            const ds = sortedDates[i];
+            const prevDs = sortedDates[i - 1];
+            if (ds.slice(0, 7) === prevDs.slice(0, 7) && dailyMap[ds]) {
+                const apiDelta = Math.max(0, dailyQuotaLedger[ds] - dailyQuotaLedger[prevDs]);
+                if (apiDelta > dailyMap[ds].credits) {
+                    dailyMap[ds].credits = apiDelta;
+                }
+            }
+        }
+    }
+    const localMinedCredits = Math.round(sessionsTotalCredits * 100) / 100;
+    const totalUsedCredits = apiQuota && apiQuota.used > localMinedCredits
         ? apiQuota.used
-        : Math.round(sessionsTotalCredits * 100) / 100;
-    if (apiQuota && apiQuota.used > sessionsTotalCredits + 0.1) {
-        const unattributed = Math.round((apiQuota.used - sessionsTotalCredits) * 100) / 100;
-        modelAgg['copilot-inline-or-other'] = {
+        : localMinedCredits;
+    if (apiQuota && apiQuota.used > localMinedCredits + 0.5) {
+        const externalCredits = Math.round((apiQuota.used - localMinedCredits) * 100) / 100;
+        modelAgg['External / Non-Chat Copilot Usage'] = {
             multiplier: 1,
-            messages: Math.ceil(unattributed),
-            credits: unattributed,
-            tokens: Math.ceil(unattributed * 1200)
+            messages: Math.ceil(externalCredits),
+            credits: externalCredits,
+            tokens: 0
         };
     }
-    const todayBucket = dailyMap[todayStr] || {
-        credits: 0,
-        messages: 0,
-        sessionsCount: 0,
-        exp40to60: 0,
-        expOver60: 0
-    };
-    const todayUsedCredits = Math.round(todayBucket.credits * 100) / 100;
+    const todayBucket = dailyMap[todayStr];
+    const todayUsedCredits = Math.round((todayBucket?.credits || 0) * 100) / 100;
     const usedBeforeToday = Math.max(0, Math.round((totalUsedCredits - todayUsedCredits) * 100) / 100);
     // 4. Extra (Rollover Surplus) & Credit Debt Calculation
     const expectedUsedBeforeToday = Math.round(calendar.pastWorkdays * baseDailyLimit * 100) / 100;
-    // Net Balance entering today = (Budget for past workdays - Actual used before today) + Extra monthly credits
     const netBalance = Math.round(((expectedUsedBeforeToday - usedBeforeToday) + extraCredits) * 100) / 100;
     const rolloverExtraCredits = Math.max(0, netBalance);
     const creditDebt = Math.max(0, -netBalance);
-    // Effective daily limit spreads remaining monthly pool (including extra credits & debt) across remaining workdays
     const remainingPoolEnteringToday = Math.max(0, totalMonthlyCredits - usedBeforeToday);
     const effectiveDailyLimit = Math.round((remainingPoolEnteringToday / calendar.remainingWorkdays) * 100) / 100;
     const standardDailyPercent = recommendedDailyLimit > 0 ? Math.round((todayUsedCredits / recommendedDailyLimit) * 1000) / 10 : 0;
@@ -636,7 +1006,7 @@ function computeAnalytics(config, now, sessionsInput, apiQuota) {
             isFuture: d > currentDay,
             credits: dayCredits,
             messages: bucket?.messages || 0,
-            sessionsCount: bucket?.sessionsCount || 0,
+            sessionsCount: bucket?.sessionIds.size || 0,
             expensiveChats40to60: bucket?.exp40to60 || 0,
             expensiveChatsOver60: bucket?.expOver60 || 0,
             totalExpensiveChats: (bucket?.exp40to60 || 0) + (bucket?.expOver60 || 0),
@@ -685,7 +1055,7 @@ function computeAnalytics(config, now, sessionsInput, apiQuota) {
         credits: Math.round(w.credits * 100) / 100,
         percentOfCredits: totalUsedCredits > 0 ? Math.round((w.credits / totalUsedCredits) * 1000) / 10 : 0
     }))
-        .sort((a, b) => b.credits - a.credits);
+        .sort((a, b) => b.credits - a.credits || b.messages - a.messages);
     // 7. Expensive Sessions Leaderboard & Counts
     const monthExpensive40to60 = sessions.filter(s => s.expenseTier === 'heavy-40-60').length;
     const monthExpensiveOver60 = sessions.filter(s => s.expenseTier === 'mega-60plus').length;
@@ -694,7 +1064,7 @@ function computeAnalytics(config, now, sessionsInput, apiQuota) {
         .sort((a, b) => b.credits - a.credits || b.messages - a.messages)
         .slice(0, 15);
     const activeTodayTopSession = sessions
-        .filter(s => s.dateStr === todayStr)
+        .filter(s => s.dateStr === todayStr || s.turns?.some(t => t.dateStr === todayStr))
         .sort((a, b) => b.credits - a.credits)[0];
     // 8. Forecast & Smart Insights
     const projectedMonthlyCredits = Math.round(workdayAverageCredits * calendar.totalWorkdays * 100) / 100;
@@ -715,10 +1085,9 @@ function computeAnalytics(config, now, sessionsInput, apiQuota) {
             }
         }
     }
-    // Calculate potential savings if 50% of >1x multiplier calls switched to 1x models
     let highMultiplierSavingsEstimate = 0;
     for (const m of models) {
-        if (m.multiplier > 1 && m.messages > 0) {
+        if (m.multiplier > 1 && m.messages > 0 && !m.model.startsWith('External')) {
             const savingsPerCall = m.multiplier - 1;
             highMultiplierSavingsEstimate += (m.messages * 0.5) * savingsPerCall;
         }
@@ -732,10 +1101,10 @@ function computeAnalytics(config, now, sessionsInput, apiQuota) {
         insights.push(`Surplus Banked: You have +${rolloverExtraCredits.toFixed(1)} extra credits banked (rollover + extra credits), boosting your daily allowance from ${baseDailyLimit.toFixed(1)} to ${effectiveDailyLimit.toFixed(1)} cr/workday.`);
     }
     if (monthTotalExpensiveChats > 0) {
-        insights.push(`Expensive Chats: ${monthTotalExpensiveChats} chat session(s) this month each consumed >=${minExp}% of a full day's budget (${monthExpensive40to60} used ${minExp}-${maxExp}%, ${monthExpensiveOver60} used >${maxExp}%).`);
+        insights.push(`Expensive Chats: ${monthTotalExpensiveChats} chat session(s) in ${calendar.monthName} each consumed >=${minExp}% of a full day's budget (${monthExpensive40to60} used ${minExp}-${maxExp}%, ${monthExpensiveOver60} used >${maxExp}%).`);
     }
     if (contextBloatSessionsCount > 0) {
-        insights.push(`Long Thread Tax: ${contextBloatSessionsCount} marathon session(s) (>20 turns) spent ~${contextBloatCreditsWasted.toFixed(1)} credits after turn #20. Starting a fresh chat (/new) saves context tokens and keeps sessions agile.`);
+        insights.push(`Long Thread Tax: ${contextBloatSessionsCount} marathon session(s) (>20 turns) spent ~${contextBloatCreditsWasted.toFixed(1)} credits after turn #20. Starting a fresh chat (/new) saves context tokens.`);
     }
     if (highMultiplierSavingsEstimate >= 2) {
         insights.push(`Model Optimizer: Switching 50% of high-multiplier (>1x) model requests to 1x models (Claude Sonnet / Gemini Pro) or 0x models (GPT-4.1 / GPT-4o) would save ~${highMultiplierSavingsEstimate.toFixed(1)} credits/month.`);
@@ -750,10 +1119,13 @@ function computeAnalytics(config, now, sessionsInput, apiQuota) {
         generatedAt: now.toISOString(),
         calendar,
         apiQuota,
+        minedSessionsCount: sessions.length,
+        minedWorkspacesCount: workspaces.length,
         baseMonthlyCredits,
         extraCredits,
         totalMonthlyCredits,
         totalUsedCredits,
+        localMinedCredits,
         remainingMonthlyCredits: Math.max(0, Math.round((totalMonthlyCredits - totalUsedCredits) * 100) / 100),
         monthlyUsedPercent: totalMonthlyCredits > 0 ? Math.round((totalUsedCredits / totalMonthlyCredits) * 1000) / 10 : 0,
         recommendedDailyLimit: Math.round(recommendedDailyLimit * 100) / 100,
@@ -765,16 +1137,19 @@ function computeAnalytics(config, now, sessionsInput, apiQuota) {
         rolloverExtraCredits,
         creditDebt,
         todayUsedCredits,
-        todayMessages: todayBucket.messages,
-        todaySessions: todayBucket.sessionsCount,
-        todayExpensive40to60: todayBucket.exp40to60,
-        todayExpensiveOver60: todayBucket.expOver60,
-        todayTotalExpensiveChats: todayBucket.exp40to60 + todayBucket.expOver60,
+        todayMessages: todayBucket?.messages || 0,
+        todaySessions: todayBucket?.sessionIds.size || 0,
+        todayExpensive40to60: todayBucket?.exp40to60 || 0,
+        todayExpensiveOver60: todayBucket?.expOver60 || 0,
+        todayTotalExpensiveChats: (todayBucket?.exp40to60 || 0) + (todayBucket?.expOver60 || 0),
         standardDailyPercent,
         adjustedDailyPercent,
         activeDailyPercent,
         colorTier: colorInfo.tier,
-        colorHex: colorInfo.hex,
+        colorHex: colorInfo.accentHex,
+        widgetBgHex: colorInfo.bgHex,
+        widgetHoverBgHex: colorInfo.hoverBgHex,
+        widgetFgHex: colorInfo.fgHex,
         statusEmoji: colorInfo.emoji,
         weeklyAverageCredits,
         weeklyAverageMessages,
@@ -805,18 +1180,11 @@ function computeAnalytics(config, now, sessionsInput, apiQuota) {
         insights
     };
 }
-const MONTH_SHORT_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-function formatMonthKey(year, month) {
-    return `${year}-${String(month + 1).padStart(2, '0')}`;
-}
-function getMonthShortLabel(year, month) {
-    return `${MONTH_SHORT_NAMES[month] || 'Mon'} ${year}`;
-}
 /**
  * Computes multi-month history summaries (up to `monthsBack` months) and a detailed comparison
  * between the selected month (`selectedYear`, `selectedMonth`) and its immediately preceding month.
  */
-function computeHistoryComparison(config, realNow, selectedYear, selectedMonth, sessionsByMonth, currentMonthApiQuota, monthsBack = 6) {
+function computeHistoryComparison(config, realNow, selectedYear, selectedMonth, sessionsByMonth, currentMonthApiQuota, monthsBack = 6, monthlyArchives, dailyQuotaLedger) {
     const realYear = realNow.getFullYear();
     const realMonth = realNow.getMonth();
     const realMonthKey = formatMonthKey(realYear, realMonth);
@@ -825,22 +1193,33 @@ function computeHistoryComparison(config, realNow, selectedYear, selectedMonth, 
         const mKey = formatMonthKey(y, m);
         const isCurrent = mKey === realMonthKey;
         const daysInMonth = new Date(y, m + 1, 0).getDate();
-        // For any historical month prior to realNow, use the last day of that month so all days/workdays are elapsed
         const refDate = isCurrent
             ? realNow
             : new Date(y, m, daysInMonth, 23, 59, 59);
         const monthSessions = sessionsByMonth[mKey] || [];
-        return computeAnalytics(config, refDate, monthSessions, isCurrent ? currentMonthApiQuota : undefined);
+        let quotaForMonth;
+        if (isCurrent) {
+            quotaForMonth = currentMonthApiQuota;
+        }
+        else if (monthlyArchives?.[mKey]) {
+            const arch = monthlyArchives[mKey];
+            quotaForMonth = {
+                entitlement: arch.entitlement,
+                used: arch.used,
+                remaining: Math.max(0, arch.entitlement - arch.used),
+                unlimited: false,
+                fetchedAt: arch.updatedAt
+            };
+        }
+        return computeAnalytics(config, refDate, monthSessions, quotaForMonth, dailyQuotaLedger);
     };
     const selectedSnapshot = buildSnapshotForMonth(selectedYear, selectedMonth);
-    // Immediately preceding month relative to selected month
     const prevDate = new Date(selectedYear, selectedMonth - 1, 1);
     const prevYear = prevDate.getFullYear();
     const prevMonth = prevDate.getMonth();
     const previousMonthKey = formatMonthKey(prevYear, prevMonth);
     const previousMonthLabel = `${MONTH_NAMES[prevMonth]} ${prevYear}`;
     const previousSnapshot = buildSnapshotForMonth(prevYear, prevMonth);
-    // Build chronological list of last N months up to realNow
     const monthsHistory = [];
     for (let offset = monthsBack - 1; offset >= 0; offset--) {
         const dt = new Date(realYear, realMonth - offset, 1);
@@ -869,7 +1248,6 @@ function computeHistoryComparison(config, realNow, selectedYear, selectedMonth, 
             }
         }
         const isCurr = mKey === realMonthKey;
-        // End balance: for past months, totalMonthlyCredits - totalUsedCredits; for current month, netBalance
         const endBalance = isCurr
             ? snap.netBalance
             : Math.round((snap.totalMonthlyCredits - snap.totalUsedCredits) * 100) / 100;
@@ -899,10 +1277,9 @@ function computeHistoryComparison(config, realNow, selectedYear, selectedMonth, 
             dailyCredits
         });
     }
-    // Compare Selected Month vs Previous Month at the same day-of-month point (e.g. Day 15 vs Day 15)
     const compareDay = Math.min(selectedSnapshot.calendar.currentDay, previousSnapshot.calendar.daysInMonth);
-    const sameDaySelectedCredits = selectedSnapshot.dailySeries[compareDay - 1]?.cumulativeUsed ?? selectedSnapshot.totalUsedCredits;
-    const sameDayPreviousCredits = previousSnapshot.dailySeries[compareDay - 1]?.cumulativeUsed ?? previousSnapshot.totalUsedCredits;
+    const sameDaySelectedCredits = selectedSnapshot.dailySeries[compareDay - 1]?.cumulativeUsed || selectedSnapshot.totalUsedCredits;
+    const sameDayPreviousCredits = previousSnapshot.dailySeries[compareDay - 1]?.cumulativeUsed || previousSnapshot.totalUsedCredits;
     const momSameDayDeltaCredits = Math.round((sameDaySelectedCredits - sameDayPreviousCredits) * 100) / 100;
     const momSameDayDeltaPercent = sameDayPreviousCredits > 0
         ? Math.round(((sameDaySelectedCredits - sameDayPreviousCredits) / sameDayPreviousCredits) * 1000) / 10
