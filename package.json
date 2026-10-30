@@ -2,12 +2,13 @@
   "name": "copilot-credit-analytics",
   "displayName": "Copilot Credit & Token Analytics",
   "description": "Monitors GitHub Copilot credit & token usage, calculates workday-based daily budgets, tracks extra credits & debt, identifies expensive 40-60%+ chat sessions, and visualizes model, workspace & multi-month history analytics.",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "publisher": "pospisk",
   "engines": {
     "vscode": "^1.85.0"
   },
   "extensionKind": [
+    "workspace",
     "ui"
   ],
   "categories": [
@@ -15,7 +16,6 @@
     "Visualization"
   ],
   "activationEvents": [
-    "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -114,6 +114,14 @@
           "default": 60,
           "description": "Upper threshold % of the Recommended Daily Limit separating Heavy (40-60%) sessions from Mega/Critical (>60%) sessions."
         },
+        "copilotAnalytics.chatStoragePaths": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional additional VS Code User directories (e.g. /mnt/d/Users/<WinUser>/AppData/Roaming/Code/User) to scan for Copilot Chat sessions."
+        },
         "copilotAnalytics.modelMultipliers": {
           "type": "object",
           "default": {
@@ -153,7 +161,6 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node out/test-calc.js",
-    "package": "npm run compile && npx --yes @vscode/vsce package --allow-missing-repository"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

@@ -45,6 +45,7 @@ exports.fetchCopilotInternalQuota = fetchCopilotInternalQuota;
 exports.getCandidateVSCodeUserDirs = getCandidateVSCodeUserDirs;
 exports.readWorkspaceName = readWorkspaceName;
 exports.replayJsonlMutationLog = replayJsonlMutationLog;
+exports.mineAllChatSessionsByMonthAsync = mineAllChatSessionsByMonthAsync;
 exports.mineAllChatSessionsByMonth = mineAllChatSessionsByMonth;
 exports.scanLocalChatSessions = scanLocalChatSessions;
 exports.computeAnalytics = computeAnalytics;
@@ -110,6 +111,10 @@ function formatMonthKey(year, month) {
 function getMonthShortLabel(year, month) {
     return `${MONTH_SHORT_NAMES[month] || 'Mon'} ${year}`;
 }
+/**
+ * Returns full color specification for both charts and the bottom-right VS Code Status Bar widget
+ * (solid background fill + high-contrast white or dark text).
+ */
 function getColorInfo(percent, monthlyExhausted = false) {
     if (monthlyExhausted || percent >= 100) {
         return {
@@ -230,13 +235,17 @@ function getMonthWorkdays(year, month, currentDay, workDays = [1, 2, 3, 4, 5], h
         workdayMap
     };
 }
+/**
+ * Queries GitHub's internal Copilot user quota API using an OAuth token from VS Code's GitHub authentication provider.
+ * Note: GitHub's personal Copilot API returns ONLY aggregate monthly entitlement & used count (no daily/model/session breakdown).
+ */
 function fetchCopilotInternalQuota(accessToken) {
     return new Promise((resolve) => {
         const req = https.request('https://api.github.com/copilot_internal/user', {
             method: 'GET',
             headers: {
                 'Authorization': `Bearer ${accessToken}`,
-                'User-Agent': 'VSCode-Copilot-Credit-Analytics/0.3.1',
+                'User-Agent': 'VSCode-Copilot-Credit-Analytics/0.3.2',
                 'Accept': 'application/json'
             },
             timeout: 6000
@@ -287,15 +296,63 @@ function fetchCopilotInternalQuota(accessToken) {
     });
 }
 /**
- * Discovers candidate VS Code User directories across macOS, Windows, Linux, AND WSL
- * (`/mnt/c/Users/<WinUser>/AppData/Roaming/Code/User`).
+ * Discovers Windows drive mount roots inside WSL (e.g. `/mnt/c`, `/c`, `/mnt/d`)
+ * by reading `/proc/mounts` (pure in-memory kernel pseudo-file, zero child processes)
+ * plus standard WSL mount locations.
  */
-function getCandidateVSCodeUserDirs(primaryUserDir) {
-    const dirs = new Set();
-    if (primaryUserDir && fs.existsSync(primaryUserDir)) {
-        dirs.add(primaryUserDir);
+function getWindowsMountRootsInWSL() {
+    const mounts = new Set(['/mnt/c', '/c', '/mnt/d', '/d']);
+    try {
+        if (fs.existsSync('/proc/mounts')) {
+            const content = fs.readFileSync('/proc/mounts', 'utf8');
+            for (const line of content.split(/\r?\n/)) {
+                const parts = line.split(' ');
+                if (parts.length < 3) {
+                    continue;
+                }
+                const mountPoint = parts[1];
+                const fsType = parts[2];
+                if ((fsType === '9p' || fsType === 'drvfs') &&
+                    mountPoint &&
+                    !mountPoint.startsWith('/usr/') &&
+                    !mountPoint.startsWith('/mnt/wsl')) {
+                    mounts.add(mountPoint);
+                }
+            }
+        }
     }
+    catch {
+        // ignore
+    }
+    return Array.from(mounts);
+}
+/**
+ * Discovers candidate VS Code User directories across macOS, Windows, Linux, AND Remote-WSL
+ * (both WSL `~/.vscode-server/data/User` and Windows host `<mount>/Users/<WinUser>/AppData/Roaming/Code/User`).
+ */
+function getCandidateVSCodeUserDirs(primaryUserDir, extraPaths) {
+    const dirs = new Set();
     const home = os.homedir();
+    const normalizeCandidate = (p) => {
+        const expanded = p.startsWith('~/') || p === '~' ? path.join(home, p.slice(1)) : p.trim();
+        return path.basename(expanded) === 'workspaceStorage' ? path.dirname(expanded) : expanded;
+    };
+    if (Array.isArray(extraPaths)) {
+        for (const raw of extraPaths) {
+            if (typeof raw === 'string' && raw.trim()) {
+                const candidate = normalizeCandidate(raw);
+                if (fs.existsSync(candidate)) {
+                    dirs.add(candidate);
+                }
+            }
+        }
+    }
+    if (primaryUserDir) {
+        const candidate = normalizeCandidate(primaryUserDir);
+        if (fs.existsSync(candidate)) {
+            dirs.add(candidate);
+        }
+    }
     const platform = process.platform;
     const standardRoots = [];
     if (platform === 'darwin') {
@@ -305,16 +362,21 @@ function getCandidateVSCodeUserDirs(primaryUserDir) {
         standardRoots.push(path.join(process.env.APPDATA, 'Code', 'User'), path.join(process.env.APPDATA, 'Code - Insiders', 'User'));
     }
     else {
-        standardRoots.push(path.join(home, '.config', 'Code', 'User'), path.join(home, '.config', 'Code - Insiders', 'User'));
-        // WSL fallback: in Remote-WSL, Copilot Chat sessions live on the Windows host under %APPDATA%\Code\User
-        const wslUsersDir = '/mnt/c/Users';
-        if (fs.existsSync(wslUsersDir)) {
+        standardRoots.push(path.join(home, '.vscode-server', 'data', 'User'), path.join(home, '.vscode-server-insiders', 'data', 'User'), path.join(home, '.config', 'Code', 'User'), path.join(home, '.config', 'Code - Insiders', 'User'));
+        // Remote-WSL bridge: VS Code's Chat UI runs in the Windows client and writes chatSessions/*.jsonl
+        // to %APPDATA%\Code\User on the Windows filesystem (mounted at /mnt/c, /c, etc.).
+        const skipWinUsers = new Set(['Public', 'Default', 'Default User', 'All Users']);
+        for (const mountRoot of getWindowsMountRootsInWSL()) {
+            const usersDir = path.join(mountRoot, 'Users');
+            if (!fs.existsSync(usersDir)) {
+                continue;
+            }
             try {
-                for (const winUser of fs.readdirSync(wslUsersDir)) {
-                    if (winUser === 'Public' || winUser === 'Default' || winUser === 'Default User' || winUser === 'All Users') {
+                for (const winUser of fs.readdirSync(usersDir)) {
+                    if (skipWinUsers.has(winUser) || winUser.startsWith('.')) {
                         continue;
                     }
-                    standardRoots.push(path.join(wslUsersDir, winUser, 'AppData', 'Roaming', 'Code', 'User'), path.join(wslUsersDir, winUser, 'AppData', 'Roaming', 'Code - Insiders', 'User'));
+                    standardRoots.push(path.join(usersDir, winUser, 'AppData', 'Roaming', 'Code', 'User'), path.join(usersDir, winUser, 'AppData', 'Roaming', 'Code - Insiders', 'User'));
                 }
             }
             catch {
@@ -337,21 +399,32 @@ function readWorkspaceName(hashDir) {
     const wsJsonPath = path.join(hashDir, 'workspace.json');
     try {
         if (fs.existsSync(wsJsonPath)) {
-            const content = JSON.parse(fs.readFileSync(wsJsonPath, 'utf8'));
-            const uriStr = content.folder || content.workspace || '';
-            if (uriStr) {
-                const decoded = decodeURIComponent(uriStr);
-                // Strip scheme + authority (e.g. file:///c:/... or vscode-remote://wsl+Ubuntu/home/...)
-                const withoutScheme = decoded.replace(/^[a-zA-Z0-9+.-]+:\/\/[^/]*/, '').replace(/\\/g, '/').replace(/\/+$/, '');
-                const base = withoutScheme.split('/').filter(Boolean).pop() || '';
-                if (base) {
-                    return base.replace(/\.code-workspace$/i, '');
-                }
-            }
+            return parseWorkspaceJsonContent(fs.readFileSync(wsJsonPath, 'utf8'));
         }
     }
     catch {
         // ignore malformed workspace.json
+    }
+    return 'Workspace';
+}
+function parseWorkspaceJsonContent(raw) {
+    try {
+        const content = JSON.parse(raw);
+        const uriStr = content.folder || content.workspace || '';
+        if (uriStr) {
+            const decoded = decodeURIComponent(uriStr);
+            const withoutScheme = decoded
+                .replace(/^[a-zA-Z0-9+.-]+:\/\/[^/]*/, '')
+                .replace(/\\/g, '/')
+                .replace(/\/+$/, '');
+            const base = withoutScheme.split('/').filter(Boolean).pop() || '';
+            if (base) {
+                return base.replace(/\.code-workspace$/i, '');
+            }
+        }
+    }
+    catch {
+        // ignore
     }
     return 'Workspace';
 }
@@ -394,6 +467,14 @@ function deleteByPath(root, keys) {
         }
     }
 }
+/**
+ * Replays VS Code's objectMutationLog (.jsonl) format:
+ * - kind 0: initial full state snapshot under `v`
+ * - kind 1: set property at key-path `k` to `v`
+ * - kind 2: splice/truncate-and-append array at key-path `k` from index `i` with items `v`
+ * - kind 3: delete property at key-path `k`
+ * Also supports legacy flat JSONL lines containing `requests` or single prompt objects.
+ */
 function replayJsonlMutationLog(rawContent) {
     const lines = rawContent.split(/\r?\n/);
     let state = undefined;
@@ -652,7 +733,167 @@ function buildMonthlySessionRecord(sessionId, title, workspaceName, monthTurns, 
         turns: sorted
     };
 }
+// In-memory cache so unchanged .jsonl files over WSL /mnt/c (9P) are never re-read or re-parsed
+const sessionFileCache = new Map();
+function parseRawSessionContent(fullPath, raw, workspaceName, mtimeMs, multipliers) {
+    const baseId = path.basename(fullPath).replace(/\.(jsonl|json)$/i, '');
+    const state = fullPath.endsWith('.jsonl') ? replayJsonlMutationLog(raw) : JSON.parse(raw);
+    return parseSessionObject(state, baseId, workspaceName, mtimeMs, multipliers);
+}
+function groupParsedSessionsByMonth(parsedEntries) {
+    const parsedById = new Map();
+    for (const entry of parsedEntries) {
+        if (!entry || entry.turns.length === 0) {
+            continue;
+        }
+        const prev = parsedById.get(entry.sessionId);
+        if (!prev || entry.turns.length > prev.turns.length || entry.mtimeMs > prev.mtimeMs) {
+            parsedById.set(entry.sessionId, entry);
+        }
+    }
+    const byMonth = {};
+    for (const session of parsedById.values()) {
+        const sortedTurns = [...session.turns].sort((a, b) => a.timestamp - b.timestamp);
+        const monthTurnGroups = new Map();
+        sortedTurns.forEach((turn, idx) => {
+            const mKey = turn.dateStr.slice(0, 7);
+            let grp = monthTurnGroups.get(mKey);
+            if (!grp) {
+                grp = { turns: [], priorCount: idx };
+                monthTurnGroups.set(mKey, grp);
+            }
+            grp.turns.push(turn);
+        });
+        for (const [mKey, grp] of monthTurnGroups.entries()) {
+            const rec = buildMonthlySessionRecord(session.sessionId, session.title, session.workspaceName, grp.turns, grp.priorCount);
+            if (rec) {
+                if (!byMonth[mKey]) {
+                    byMonth[mKey] = [];
+                }
+                byMonth[mKey].push(rec);
+            }
+        }
+    }
+    return byMonth;
+}
+/**
+ * Non-blocking async chat session miner optimized for Remote-WSL (`/mnt/c` 9P filesystem)
+ * with bounded concurrency and `(mtimeMs, size)` caching.
+ */
+async function mineAllChatSessionsByMonthAsync(userDirs, earliestTimestampMs, multipliers) {
+    const fsp = fs.promises;
+    const multipliersKey = JSON.stringify(multipliers || {});
+    const sessionFiles = [];
+    const collectChatDirFiles = async (chatDir, workspaceNameResolver) => {
+        let entries;
+        try {
+            entries = (await fsp.readdir(chatDir)).filter(f => f.endsWith('.jsonl') || f.endsWith('.json'));
+        }
+        catch {
+            return;
+        }
+        if (entries.length === 0) {
+            return;
+        }
+        const wsName = await workspaceNameResolver();
+        for (const f of entries) {
+            const fp = path.join(chatDir, f);
+            try {
+                const st = await fsp.stat(fp);
+                if (st.mtimeMs >= earliestTimestampMs) {
+                    sessionFiles.push({ fullPath: fp, workspaceName: wsName, mtimeMs: st.mtimeMs, size: st.size });
+                }
+            }
+            catch {
+                // ignore disappearing temp files
+            }
+        }
+    };
+    for (const userDir of userDirs) {
+        if (!userDir) {
+            continue;
+        }
+        const wsRoot = path.join(userDir, 'workspaceStorage');
+        let hashEntries = [];
+        try {
+            hashEntries = await fsp.readdir(wsRoot);
+        }
+        catch {
+            hashEntries = [];
+        }
+        // Scan workspaceStorage hash folders in parallel batches of 24 to minimize WSL /mnt/c 9P latency
+        const BATCH = 24;
+        for (let i = 0; i < hashEntries.length; i += BATCH) {
+            const slice = hashEntries.slice(i, i + BATCH);
+            await Promise.all(slice.map(async (hashName) => {
+                const hashDir = path.join(wsRoot, hashName);
+                const chatDir = path.join(hashDir, 'chatSessions');
+                await collectChatDirFiles(chatDir, async () => {
+                    try {
+                        const rawWs = await fsp.readFile(path.join(hashDir, 'workspace.json'), 'utf8');
+                        return parseWorkspaceJsonContent(rawWs);
+                    }
+                    catch {
+                        return 'Workspace';
+                    }
+                });
+            }));
+        }
+        const emptyChatDirs = [path.join(userDir, 'globalStorage', 'emptyWindowChatSessions')];
+        const profilesDir = path.join(userDir, 'profiles');
+        try {
+            const profiles = await fsp.readdir(profilesDir);
+            for (const prof of profiles) {
+                emptyChatDirs.push(path.join(profilesDir, prof, 'globalStorage', 'emptyWindowChatSessions'));
+            }
+        }
+        catch {
+            // no profiles folder
+        }
+        for (const emptyDir of emptyChatDirs) {
+            await collectChatDirFiles(emptyDir, async () => 'Empty Window');
+        }
+    }
+    const parsedEntries = [];
+    const READ_BATCH = 16;
+    for (let i = 0; i < sessionFiles.length; i += READ_BATCH) {
+        const batch = sessionFiles.slice(i, i + READ_BATCH);
+        await Promise.all(batch.map(async (item) => {
+            const cached = sessionFileCache.get(item.fullPath);
+            if (cached &&
+                cached.mtimeMs === item.mtimeMs &&
+                cached.size === item.size &&
+                cached.multipliersKey === multipliersKey) {
+                if (cached.parsed) {
+                    parsedEntries.push({ ...cached.parsed, workspaceName: item.workspaceName, mtimeMs: item.mtimeMs });
+                }
+                return;
+            }
+            try {
+                const raw = await fsp.readFile(item.fullPath, 'utf8');
+                const parsed = parseRawSessionContent(item.fullPath, raw, item.workspaceName, item.mtimeMs, multipliers);
+                sessionFileCache.set(item.fullPath, {
+                    mtimeMs: item.mtimeMs,
+                    size: item.size,
+                    multipliersKey,
+                    parsed: parsed || null
+                });
+                if (parsed) {
+                    parsedEntries.push({ ...parsed, mtimeMs: item.mtimeMs });
+                }
+            }
+            catch {
+                // Ignore unreadable or partially written file
+            }
+        }));
+    }
+    return groupParsedSessionsByMonth(parsedEntries);
+}
+/**
+ * Synchronous chat session miner (used by unit tests and single-folder utilities).
+ */
 function mineAllChatSessionsByMonth(userDirs, earliestTimestampMs, multipliers) {
+    const multipliersKey = JSON.stringify(multipliers || {});
     const sessionFiles = [];
     for (const userDir of userDirs) {
         if (!userDir || !fs.existsSync(userDir)) {
@@ -689,7 +930,7 @@ function mineAllChatSessionsByMonth(userDirs, earliestTimestampMs, multipliers) 
                     try {
                         const st = fs.statSync(fp);
                         if (st.mtimeMs >= earliestTimestampMs) {
-                            sessionFiles.push({ fullPath: fp, workspaceName: wsName, mtimeMs: st.mtimeMs });
+                            sessionFiles.push({ fullPath: fp, workspaceName: wsName, mtimeMs: st.mtimeMs, size: st.size });
                         }
                     }
                     catch {
@@ -720,7 +961,7 @@ function mineAllChatSessionsByMonth(userDirs, earliestTimestampMs, multipliers) 
                     const fp = path.join(emptyDir, f);
                     const st = fs.statSync(fp);
                     if (st.mtimeMs >= earliestTimestampMs) {
-                        sessionFiles.push({ fullPath: fp, workspaceName: 'Empty Window', mtimeMs: st.mtimeMs });
+                        sessionFiles.push({ fullPath: fp, workspaceName: 'Empty Window', mtimeMs: st.mtimeMs, size: st.size });
                     }
                 }
             }
@@ -729,51 +970,36 @@ function mineAllChatSessionsByMonth(userDirs, earliestTimestampMs, multipliers) 
             }
         }
     }
-    const parsedById = new Map();
+    const parsedEntries = [];
     for (const item of sessionFiles) {
+        const cached = sessionFileCache.get(item.fullPath);
+        if (cached &&
+            cached.mtimeMs === item.mtimeMs &&
+            cached.size === item.size &&
+            cached.multipliersKey === multipliersKey) {
+            if (cached.parsed) {
+                parsedEntries.push({ ...cached.parsed, workspaceName: item.workspaceName, mtimeMs: item.mtimeMs });
+            }
+            continue;
+        }
         try {
             const raw = fs.readFileSync(item.fullPath, 'utf8');
-            const baseId = path.basename(item.fullPath).replace(/\.(jsonl|json)$/i, '');
-            const state = item.fullPath.endsWith('.jsonl')
-                ? replayJsonlMutationLog(raw)
-                : JSON.parse(raw);
-            const parsed = parseSessionObject(state, baseId, item.workspaceName, item.mtimeMs, multipliers);
-            if (!parsed || parsed.turns.length === 0) {
-                continue;
-            }
-            const prev = parsedById.get(parsed.sessionId);
-            if (!prev || parsed.turns.length > prev.turns.length || item.mtimeMs > prev.mtimeMs) {
-                parsedById.set(parsed.sessionId, { ...parsed, mtimeMs: item.mtimeMs });
+            const parsed = parseRawSessionContent(item.fullPath, raw, item.workspaceName, item.mtimeMs, multipliers);
+            sessionFileCache.set(item.fullPath, {
+                mtimeMs: item.mtimeMs,
+                size: item.size,
+                multipliersKey,
+                parsed: parsed || null
+            });
+            if (parsed) {
+                parsedEntries.push({ ...parsed, mtimeMs: item.mtimeMs });
             }
         }
         catch {
             // Ignore unreadable or empty file
         }
     }
-    const byMonth = {};
-    for (const session of parsedById.values()) {
-        const sortedTurns = [...session.turns].sort((a, b) => a.timestamp - b.timestamp);
-        const monthTurnGroups = new Map();
-        sortedTurns.forEach((turn, idx) => {
-            const mKey = turn.dateStr.slice(0, 7);
-            let grp = monthTurnGroups.get(mKey);
-            if (!grp) {
-                grp = { turns: [], priorCount: idx };
-                monthTurnGroups.set(mKey, grp);
-            }
-            grp.turns.push(turn);
-        });
-        for (const [mKey, grp] of monthTurnGroups.entries()) {
-            const rec = buildMonthlySessionRecord(session.sessionId, session.title, session.workspaceName, grp.turns, grp.priorCount);
-            if (rec) {
-                if (!byMonth[mKey]) {
-                    byMonth[mKey] = [];
-                }
-                byMonth[mKey].push(rec);
-            }
-        }
-    }
-    return byMonth;
+    return groupParsedSessionsByMonth(parsedEntries);
 }
 function scanLocalChatSessions(storagePath, year, month, multipliers) {
     if (!storagePath || !fs.existsSync(storagePath)) {
@@ -1163,9 +1389,7 @@ function computeHistoryComparison(config, realNow, selectedYear, selectedMonth, 
         const mKey = formatMonthKey(y, m);
         const isCurrent = mKey === realMonthKey;
         const daysInMonth = new Date(y, m + 1, 0).getDate();
-        const refDate = isCurrent
-            ? realNow
-            : new Date(y, m, daysInMonth, 23, 59, 59);
+        const refDate = isCurrent ? realNow : new Date(y, m, daysInMonth, 23, 59, 59);
         const monthSessions = sessionsByMonth[mKey] || [];
         let quotaForMonth;
         if (isCurrent) {

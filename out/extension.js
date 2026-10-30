@@ -44,22 +44,27 @@ const DAILY_QUOTA_LEDGER_KEY = 'copilotAnalytics.dailyQuotaLedger.v1';
 const MONTHLY_ARCHIVES_KEY = 'copilotAnalytics.monthlyArchives.v1';
 const ALERTED_SESSION_IDS_KEY = 'copilotAnalytics.alertedSessions.v1';
 const HISTORY_MONTHS_COUNT = 6;
+const API_POLL_INTERVAL_MS = 120_000;
+const LOCAL_CHAT_POLL_INTERVAL_MS = 30_000;
 let statusBarItem;
 let dashboardPanel;
 let currentMonthSnapshot;
 let latestHistoryComparison;
+let lastScannedDirs = [];
 let selectedYear;
 let selectedMonth;
 let refreshTimer;
+let activeRefreshPromise;
+let lastApiFetchMs = 0;
 let isUpdatingStatusColors = false;
 function activate(context) {
     statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
     statusBarItem.command = 'copilotAnalytics.showDashboard';
     statusBarItem.name = 'Copilot Credit & Daily Limit Monitor';
-    statusBarItem.text = '$(copilot) Loading Credits...';
+    statusBarItem.text = '$(sync~spin) Copilot: Mining Chats...';
     statusBarItem.show();
     context.subscriptions.push(statusBarItem);
-    const refreshAll = async (interactiveAuth = false) => {
+    const runRefresh = async (interactiveAuth = false, forceApi = false) => {
         const config = readTrackerConfig();
         const now = new Date();
         if (selectedYear === undefined || selectedMonth === undefined) {
@@ -70,20 +75,24 @@ function activate(context) {
         const todayStr = (0, tracker_1.formatDateYMD)(now);
         // 1. Fetch GitHub Copilot API quota (aggregate monthly entitlement & used total)
         let apiQuota = context.globalState.get(LAST_API_QUOTA_KEY);
-        try {
-            const session = await vscode.authentication.getSession('github', ['read:user'], {
-                createIfNone: interactiveAuth
-            });
-            if (session?.accessToken) {
-                const freshQuota = await (0, tracker_1.fetchCopilotInternalQuota)(session.accessToken);
-                if (freshQuota) {
-                    apiQuota = freshQuota;
-                    await context.globalState.update(LAST_API_QUOTA_KEY, freshQuota);
+        const shouldFetchApi = interactiveAuth || forceApi || Date.now() - lastApiFetchMs >= API_POLL_INTERVAL_MS;
+        if (shouldFetchApi) {
+            try {
+                const session = await vscode.authentication.getSession('github', ['read:user'], {
+                    createIfNone: interactiveAuth
+                });
+                if (session?.accessToken) {
+                    const freshQuota = await (0, tracker_1.fetchCopilotInternalQuota)(session.accessToken);
+                    lastApiFetchMs = Date.now();
+                    if (freshQuota) {
+                        apiQuota = freshQuota;
+                        await context.globalState.update(LAST_API_QUOTA_KEY, freshQuota);
+                    }
                 }
             }
-        }
-        catch {
-            // Fallback to cached quota or local session calculation
+            catch {
+                // Fallback to cached quota or local session calculation
+            }
         }
         // Persist daily API quota ledger & monthly archive so non-chat deltas and past months are retained
         const dailyLedger = { ...context.globalState.get(DAILY_QUOTA_LEDGER_KEY, {}) };
@@ -98,13 +107,14 @@ function activate(context) {
             await context.globalState.update(DAILY_QUOTA_LEDGER_KEY, dailyLedger);
             await context.globalState.update(MONTHLY_ARCHIVES_KEY, monthlyArchives);
         }
-        // 2. Mine local VS Code Copilot Chat sessions (.jsonl mutation logs + .json + emptyWindowChatSessions)
+        // 2. Mine local VS Code Copilot Chat sessions asynchronously (.jsonl mutation logs + .json + WSL /mnt/c bridge)
         const primaryUserDir = path.dirname(path.dirname(context.globalStorageUri.fsPath));
-        const userDirs = (0, tracker_1.getCandidateVSCodeUserDirs)(primaryUserDir);
+        const userDirs = (0, tracker_1.getCandidateVSCodeUserDirs)(primaryUserDir, config.chatStoragePaths);
+        lastScannedDirs = userDirs;
         const earliestYear = Math.min(now.getFullYear(), selectedYear);
         const earliestMonth = Math.min(now.getMonth() - HISTORY_MONTHS_COUNT, selectedMonth - 1);
         const earliestDateMs = new Date(earliestYear, earliestMonth, 1, 0, 0, 0).getTime();
-        const sessionsByMonth = (0, tracker_1.mineAllChatSessionsByMonth)(userDirs, earliestDateMs, config.modelMultipliers);
+        const sessionsByMonth = await (0, tracker_1.mineAllChatSessionsByMonthAsync)(userDirs, earliestDateMs, config.modelMultipliers);
         // 3. Compute analytics & history comparison
         latestHistoryComparison = (0, tracker_1.computeHistoryComparison)(config, now, selectedYear, selectedMonth, sessionsByMonth, apiQuota, HISTORY_MONTHS_COUNT, monthlyArchives, dailyLedger);
         currentMonthSnapshot =
@@ -116,6 +126,18 @@ function activate(context) {
         if (dashboardPanel && latestHistoryComparison) {
             dashboardPanel.webview.html = renderDashboardHtml(latestHistoryComparison, config);
         }
+    };
+    const refreshAll = async (interactiveAuth = false) => {
+        if (activeRefreshPromise && !interactiveAuth) {
+            return activeRefreshPromise;
+        }
+        const p = runRefresh(interactiveAuth, interactiveAuth).finally(() => {
+            if (activeRefreshPromise === p) {
+                activeRefreshPromise = undefined;
+            }
+        });
+        activeRefreshPromise = p;
+        return p;
     };
     // Register Commands
     context.subscriptions.push(vscode.commands.registerCommand('copilotAnalytics.showDashboard', async () => {
@@ -163,13 +185,19 @@ function activate(context) {
     }));
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(e => {
         if (!isUpdatingStatusColors && e.affectsConfiguration('copilotAnalytics')) {
-            refreshAll(false);
+            void refreshAll(false);
         }
     }));
-    refreshAll(false);
-    refreshTimer = setInterval(() => refreshAll(false), 120_000);
+    // Defer initial scan by 50ms so activation completes immediately on window reload
+    const initialStartupTimer = setTimeout(() => {
+        void refreshAll(false);
+    }, 50);
+    refreshTimer = setInterval(() => {
+        void refreshAll(false);
+    }, LOCAL_CHAT_POLL_INTERVAL_MS);
     context.subscriptions.push({
         dispose: () => {
+            clearTimeout(initialStartupTimer);
             if (refreshTimer) {
                 clearInterval(refreshTimer);
             }
@@ -194,6 +222,7 @@ function readTrackerConfig() {
         colorStatusBarBackground: cfg.get('colorStatusBarBackground', true),
         expensiveSessionMinPercent: cfg.get('expensiveSessionMinPercent', 40),
         expensiveSessionMaxPercent: cfg.get('expensiveSessionMaxPercent', 60),
+        chatStoragePaths: cfg.get('chatStoragePaths', []),
         modelMultipliers: cfg.get('modelMultipliers', {})
     };
 }
@@ -241,7 +270,7 @@ async function syncStatusBarWidgetColors(snap, config) {
     statusBarItem.backgroundColor = new vscode.ThemeColor(isRed ? 'statusBarItem.errorBackground' : 'statusBarItem.warningBackground');
     statusBarItem.color = snap.widgetFgHex;
     const wbConfig = vscode.workspace.getConfiguration('workbench');
-    const existing = wbConfig.get('colorCustomizations') || {};
+    const existing = wbConfig.inspect('colorCustomizations')?.globalValue || {};
     const bgKey = isRed ? 'statusBarItem.errorBackground' : 'statusBarItem.warningBackground';
     const fgKey = isRed ? 'statusBarItem.errorForeground' : 'statusBarItem.warningForeground';
     const hoverBgKey = isRed ? 'statusBarItem.errorHoverBackground' : 'statusBarItem.warningHoverBackground';
@@ -1174,7 +1203,10 @@ function renderDashboardHtml(historyComp, config) {
             </thead>
             <tbody>${topSessionsRows}</tbody>
           </table>`
-        : `<div class="muted" style="padding:12px 0;">No local VS Code Copilot Chat sessions found for ${snap.calendar.monthName} ${snap.calendar.year}.</div>`}
+        : `<div class="muted" style="padding:12px 0;">
+            No local VS Code Copilot Chat sessions found for ${snap.calendar.monthName} ${snap.calendar.year}.<br/>
+            <span style="font-size:11px;opacity:0.8;">Scanned directories: ${escapeHtml(lastScannedDirs.join(' · ') || 'none')} (override via <code>copilotAnalytics.chatStoragePaths</code> if needed)</span>
+           </div>`}
   </div>
 
   <!-- Daily Expensive Chats Breakdown -->

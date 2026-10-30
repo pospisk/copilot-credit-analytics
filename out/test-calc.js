@@ -38,7 +38,7 @@ const fs = __importStar(require("fs"));
 const os = __importStar(require("os"));
 const path = __importStar(require("path"));
 const tracker_1 = require("./tracker");
-function runTests() {
+async function runTests() {
     console.log('Running Copilot Credit & Session Analytics verification suite...');
     // 1. Test Workdays in October 2026
     const calOct = (0, tracker_1.getMonthWorkdays)(2026, 9, 15, [1, 2, 3, 4, 5], []);
@@ -163,6 +163,31 @@ function runTests() {
     fs.mkdirSync(wslHashDir, { recursive: true });
     fs.writeFileSync(path.join(wslHashDir, 'workspace.json'), JSON.stringify({ folder: 'vscode-remote://wsl+Ubuntu/home/pospisk/work-monorepo' }), 'utf8');
     assert.strictEqual((0, tracker_1.readWorkspaceName)(wslHashDir), 'work-monorepo', 'Should extract repo name from vscode-remote://wsl URI');
+    // Verify async WSL miner + cache invalidation when .jsonl grows
+    const candidateDirs = (0, tracker_1.getCandidateVSCodeUserDirs)(undefined, [tmpUserDir]);
+    assert.ok(candidateDirs.includes(tmpUserDir), 'getCandidateVSCodeUserDirs should include extraPaths');
+    const asyncMined1 = await (0, tracker_1.mineAllChatSessionsByMonthAsync)([tmpUserDir], new Date(2026, 8, 1).getTime(), {});
+    assert.strictEqual(asyncMined1['2026-10']?.length, 2, 'Async miner should find both sessions');
+    // Append a 3rd turn to jsonl-mut-1.jsonl and verify cache invalidates immediately via file size change
+    fs.appendFileSync(path.join(chatDir, 'jsonl-mut-1.jsonl'), '\n' +
+        JSON.stringify({
+            kind: 2,
+            k: ['requests'],
+            i: 2,
+            v: [
+                {
+                    requestId: 'req-3',
+                    timestamp: new Date(2026, 9, 20, 15, 0).getTime(),
+                    message: { text: 'Third turn appended' },
+                    response: [{ value: 'Done' }],
+                    result: { details: 'Claude Sonnet 4.5 • 1x' }
+                }
+            ]
+        }), 'utf8');
+    const asyncMined2 = await (0, tracker_1.mineAllChatSessionsByMonthAsync)([tmpUserDir], new Date(2026, 8, 1).getTime(), {});
+    const updatedWsSession = asyncMined2['2026-10']?.find(s => s.sessionId === 'jsonl-mut-1');
+    assert.strictEqual(updatedWsSession.messages, 3, 'Async miner cache should invalidate when .jsonl size grows');
+    assert.strictEqual(updatedWsSession.credits, 5, 'Updated credits should be 1 + 3 + 1 = 5');
     fs.rmSync(tmpUserDir, { recursive: true, force: true });
     // 5. Test Core Budget, Extra Credits, Credit Debt, Averages, and 40-60% Expensive Sessions
     const config = {
@@ -253,5 +278,8 @@ function runTests() {
     assert.strictEqual(historyComp.sameDaySelectedCredits, 143.2);
     console.log('✅ All Copilot Credit & Session Analytics tests passed!');
 }
-runTests();
+runTests().catch(err => {
+    console.error(err);
+    process.exit(1);
+});
 //# sourceMappingURL=test-calc.js.map
