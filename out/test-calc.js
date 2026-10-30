@@ -158,6 +158,11 @@ function runTests() {
     assert.strictEqual(emptySession.credits, 0, 'GPT-4.1 0x should use 0 credits');
     const singleScan = (0, tracker_1.scanLocalChatSessions)(path.join(tmpUserDir, 'workspaceStorage'), 2026, 9, {});
     assert.strictEqual(singleScan.length, 2, 'scanLocalChatSessions should also discover sessions from parent User dir');
+    // Verify Remote-WSL workspace.json URI resolution
+    const wslHashDir = path.join(tmpUserDir, 'workspaceStorage', 'wslhash1');
+    fs.mkdirSync(wslHashDir, { recursive: true });
+    fs.writeFileSync(path.join(wslHashDir, 'workspace.json'), JSON.stringify({ folder: 'vscode-remote://wsl+Ubuntu/home/pospisk/work-monorepo' }), 'utf8');
+    assert.strictEqual((0, tracker_1.readWorkspaceName)(wslHashDir), 'work-monorepo', 'Should extract repo name from vscode-remote://wsl URI');
     fs.rmSync(tmpUserDir, { recursive: true, force: true });
     // 5. Test Core Budget, Extra Credits, Credit Debt, Averages, and 40-60% Expensive Sessions
     const config = {

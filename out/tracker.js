@@ -43,6 +43,7 @@ exports.resolveModelMultiplier = resolveModelMultiplier;
 exports.getMonthWorkdays = getMonthWorkdays;
 exports.fetchCopilotInternalQuota = fetchCopilotInternalQuota;
 exports.getCandidateVSCodeUserDirs = getCandidateVSCodeUserDirs;
+exports.readWorkspaceName = readWorkspaceName;
 exports.replayJsonlMutationLog = replayJsonlMutationLog;
 exports.mineAllChatSessionsByMonth = mineAllChatSessionsByMonth;
 exports.scanLocalChatSessions = scanLocalChatSessions;
@@ -109,17 +110,13 @@ function formatMonthKey(year, month) {
 function getMonthShortLabel(year, month) {
     return `${MONTH_SHORT_NAMES[month] || 'Mon'} ${year}`;
 }
-/**
- * Returns full color specification for both charts and the bottom-right VS Code Status Bar widget
- * (solid background fill + high-contrast white or dark text).
- */
 function getColorInfo(percent, monthlyExhausted = false) {
     if (monthlyExhausted || percent >= 100) {
         return {
             tier: 'red',
             bgHex: '#dc2626',
             hoverBgHex: '#b91c1c',
-            fgHex: '#ffffff', // White text on crimson red
+            fgHex: '#ffffff',
             accentHex: '#ef4444',
             emoji: '🔴',
             label: 'Over Limit'
@@ -130,7 +127,7 @@ function getColorInfo(percent, monthlyExhausted = false) {
             tier: 'orange',
             bgHex: '#f97316',
             hoverBgHex: '#ea580c',
-            fgHex: '#111827', // Dark text on vibrant orange
+            fgHex: '#111827',
             accentHex: '#f97316',
             emoji: '🟠',
             label: 'Near Limit'
@@ -141,7 +138,7 @@ function getColorInfo(percent, monthlyExhausted = false) {
             tier: 'yellow',
             bgHex: '#facc15',
             hoverBgHex: '#eab308',
-            fgHex: '#111827', // Dark text on bright yellow
+            fgHex: '#111827',
             accentHex: '#eab308',
             emoji: '🟡',
             label: 'Moderate'
@@ -151,7 +148,7 @@ function getColorInfo(percent, monthlyExhausted = false) {
         tier: 'green',
         bgHex: '#16a34a',
         hoverBgHex: '#15803d',
-        fgHex: '#ffffff', // White text on emerald green
+        fgHex: '#ffffff',
         accentHex: '#22c55e',
         emoji: '🟢',
         label: 'Healthy'
@@ -233,17 +230,13 @@ function getMonthWorkdays(year, month, currentDay, workDays = [1, 2, 3, 4, 5], h
         workdayMap
     };
 }
-/**
- * Queries GitHub's internal Copilot user quota API using an OAuth token from VS Code's GitHub authentication provider.
- * Note: GitHub's personal Copilot API returns ONLY aggregate monthly entitlement & used count (no daily/model/session breakdown).
- */
 function fetchCopilotInternalQuota(accessToken) {
     return new Promise((resolve) => {
         const req = https.request('https://api.github.com/copilot_internal/user', {
             method: 'GET',
             headers: {
                 'Authorization': `Bearer ${accessToken}`,
-                'User-Agent': 'VSCode-Copilot-Credit-Analytics/0.3',
+                'User-Agent': 'VSCode-Copilot-Credit-Analytics/0.3.1',
                 'Accept': 'application/json'
             },
             timeout: 6000
@@ -294,8 +287,8 @@ function fetchCopilotInternalQuota(accessToken) {
     });
 }
 /**
- * Discovers candidate VS Code User directories so local chat sessions are mined whether running
- * in standard VS Code, VS Code Insiders, or an Extension Development Host.
+ * Discovers candidate VS Code User directories across macOS, Windows, Linux, AND WSL
+ * (`/mnt/c/Users/<WinUser>/AppData/Roaming/Code/User`).
  */
 function getCandidateVSCodeUserDirs(primaryUserDir) {
     const dirs = new Set();
@@ -313,6 +306,21 @@ function getCandidateVSCodeUserDirs(primaryUserDir) {
     }
     else {
         standardRoots.push(path.join(home, '.config', 'Code', 'User'), path.join(home, '.config', 'Code - Insiders', 'User'));
+        // WSL fallback: in Remote-WSL, Copilot Chat sessions live on the Windows host under %APPDATA%\Code\User
+        const wslUsersDir = '/mnt/c/Users';
+        if (fs.existsSync(wslUsersDir)) {
+            try {
+                for (const winUser of fs.readdirSync(wslUsersDir)) {
+                    if (winUser === 'Public' || winUser === 'Default' || winUser === 'Default User' || winUser === 'All Users') {
+                        continue;
+                    }
+                    standardRoots.push(path.join(wslUsersDir, winUser, 'AppData', 'Roaming', 'Code', 'User'), path.join(wslUsersDir, winUser, 'AppData', 'Roaming', 'Code - Insiders', 'User'));
+                }
+            }
+            catch {
+                // ignore permission errors on system folders
+            }
+        }
     }
     for (const r of standardRoots) {
         if (fs.existsSync(r)) {
@@ -321,6 +329,10 @@ function getCandidateVSCodeUserDirs(primaryUserDir) {
     }
     return Array.from(dirs);
 }
+/**
+ * Extracts a clean project/repository name from workspace.json, handling both local file:// URIs
+ * and Remote-WSL / SSH URIs (e.g. vscode-remote://wsl+Ubuntu/home/user/my-project).
+ */
 function readWorkspaceName(hashDir) {
     const wsJsonPath = path.join(hashDir, 'workspace.json');
     try {
@@ -328,8 +340,13 @@ function readWorkspaceName(hashDir) {
             const content = JSON.parse(fs.readFileSync(wsJsonPath, 'utf8'));
             const uriStr = content.folder || content.workspace || '';
             if (uriStr) {
-                const decoded = decodeURIComponent(uriStr.replace(/^file:\/\//, ''));
-                return path.basename(decoded).replace(/\.code-workspace$/i, '') || 'Workspace';
+                const decoded = decodeURIComponent(uriStr);
+                // Strip scheme + authority (e.g. file:///c:/... or vscode-remote://wsl+Ubuntu/home/...)
+                const withoutScheme = decoded.replace(/^[a-zA-Z0-9+.-]+:\/\/[^/]*/, '').replace(/\\/g, '/').replace(/\/+$/, '');
+                const base = withoutScheme.split('/').filter(Boolean).pop() || '';
+                if (base) {
+                    return base.replace(/\.code-workspace$/i, '');
+                }
             }
         }
     }
@@ -338,7 +355,6 @@ function readWorkspaceName(hashDir) {
     }
     return 'Workspace';
 }
-// --- VS Code .jsonl Object Mutation Log Replay Helpers (kind: 0, 1, 2, 3) ---
 function getByPath(root, keys) {
     let curr = root;
     for (const k of keys) {
@@ -378,14 +394,6 @@ function deleteByPath(root, keys) {
         }
     }
 }
-/**
- * Replays VS Code's objectMutationLog (.jsonl) format:
- * - kind 0: initial full state snapshot under `v`
- * - kind 1: set property at key-path `k` to `v`
- * - kind 2: splice/truncate-and-append array at key-path `k` from index `i` with items `v`
- * - kind 3: delete property at key-path `k`
- * Also supports legacy flat JSONL lines containing `requests` or single prompt objects.
- */
 function replayJsonlMutationLog(rawContent) {
     const lines = rawContent.split(/\r?\n/);
     let state = undefined;
@@ -479,7 +487,6 @@ function extractModelAndMultiplier(req, sessionState, customMultipliers) {
     let modelCandidate = '';
     const detailsStr = typeof req?.result?.details === 'string' ? req.result.details.trim() : '';
     if (detailsStr) {
-        // Parse Copilot Chat footer strings like "Claude Sonnet 4 • 1x" or "GPT-4.1 • 0x"
         const multMatch = detailsStr.match(/(?:[•·|-]|\()\s*(\d+(?:\.\d+)?)\s*x\b/i);
         if (multMatch) {
             explicitMultiplier = parseFloat(multMatch[1]);
@@ -506,7 +513,6 @@ function extractModelAndMultiplier(req, sessionState, customMultipliers) {
             '';
         modelCandidate = normalizeModelName(rawId);
     }
-    // Allow user overrides in copilotAnalytics.modelMultipliers to take priority if explicitly configured
     const cleanUserOverrides = {};
     for (const [k, v] of Object.entries(customMultipliers || {})) {
         cleanUserOverrides[normalizeModelName(k)] = v;
@@ -620,7 +626,6 @@ function buildMonthlySessionRecord(sessionId, title, workspaceName, monthTurns, 
         modelsUsed[t.model].credits = Math.round((modelsUsed[t.model].credits + t.credits) * 100) / 100;
         creditsByDay[t.dateStr] = (creditsByDay[t.dateStr] || 0) + t.credits;
     });
-    // Primary date within this month is the date with the highest credit spend (or first date if 0x model)
     const primaryDateStr = Object.entries(creditsByDay).sort((a, b) => b[1] - a[1])[0]?.[0] || sorted[0].dateStr;
     const primaryModel = Object.entries(modelsUsed).sort((a, b) => b[1].credits - a[1].credits || b[1].messages - a[1].messages)[0]?.[0] ||
         'claude-sonnet-4';
@@ -647,17 +652,12 @@ function buildMonthlySessionRecord(sessionId, title, workspaceName, monthTurns, 
         turns: sorted
     };
 }
-/**
- * Collects all chat session files (.jsonl and .json) from workspaceStorage and globalStorage/emptyWindowChatSessions
- * across one or more VS Code User directories, deduplicated by sessionId, and buckets them by YYYY-MM month key.
- */
 function mineAllChatSessionsByMonth(userDirs, earliestTimestampMs, multipliers) {
     const sessionFiles = [];
     for (const userDir of userDirs) {
         if (!userDir || !fs.existsSync(userDir)) {
             continue;
         }
-        // 1. workspaceStorage/<hash>/chatSessions
         const wsRoot = path.join(userDir, 'workspaceStorage');
         if (fs.existsSync(wsRoot)) {
             let hashEntries = [];
@@ -698,7 +698,6 @@ function mineAllChatSessionsByMonth(userDirs, earliestTimestampMs, multipliers) 
                 }
             }
         }
-        // 2. globalStorage/emptyWindowChatSessions
         const emptyChatDirs = [path.join(userDir, 'globalStorage', 'emptyWindowChatSessions')];
         const profilesDir = path.join(userDir, 'profiles');
         if (fs.existsSync(profilesDir)) {
@@ -730,7 +729,6 @@ function mineAllChatSessionsByMonth(userDirs, earliestTimestampMs, multipliers) 
             }
         }
     }
-    // Parse and deduplicate by sessionId (prefer version with more turns / newer mtime)
     const parsedById = new Map();
     for (const item of sessionFiles) {
         try {
@@ -752,13 +750,12 @@ function mineAllChatSessionsByMonth(userDirs, earliestTimestampMs, multipliers) 
             // Ignore unreadable or empty file
         }
     }
-    // Group turns per session into YYYY-MM buckets
     const byMonth = {};
     for (const session of parsedById.values()) {
         const sortedTurns = [...session.turns].sort((a, b) => a.timestamp - b.timestamp);
         const monthTurnGroups = new Map();
         sortedTurns.forEach((turn, idx) => {
-            const mKey = turn.dateStr.slice(0, 7); // YYYY-MM
+            const mKey = turn.dateStr.slice(0, 7);
             let grp = monthTurnGroups.get(mKey);
             if (!grp) {
                 grp = { turns: [], priorCount: idx };
@@ -778,38 +775,28 @@ function mineAllChatSessionsByMonth(userDirs, earliestTimestampMs, multipliers) 
     }
     return byMonth;
 }
-/**
- * Convenience single-month scanner (takes a workspaceStorageRoot directory or parent User directory).
- */
 function scanLocalChatSessions(storagePath, year, month, multipliers) {
     if (!storagePath || !fs.existsSync(storagePath)) {
         return [];
     }
-    // Accept either `<User>/workspaceStorage` or `<User>`
     const userDir = path.basename(storagePath) === 'workspaceStorage' ? path.dirname(storagePath) : storagePath;
     const monthStartMs = new Date(year, month, 1, 0, 0, 0).getTime();
     const byMonth = mineAllChatSessionsByMonth([userDir], monthStartMs, multipliers);
     return byMonth[formatMonthKey(year, month)] || [];
 }
-/**
- * Core pure calculation engine producing the complete AnalyticsSnapshot.
- */
 function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger) {
     const year = now.getFullYear();
     const month = now.getMonth();
     const currentDay = now.getDate();
     const todayStr = formatDateYMD(now);
     const calendar = getMonthWorkdays(year, month, currentDay, config.workDays, config.holidays);
-    // 1. Establish Monthly Credits
     const baseMonthlyCredits = !config.overrideApiEntitlement && apiQuota && apiQuota.entitlement > 0
         ? apiQuota.entitlement
         : Math.max(1, config.monthlyCredits || 300);
     const extraCredits = Math.max(0, config.extraCredits || 0);
     const totalMonthlyCredits = baseMonthlyCredits + extraCredits;
-    // 2. Recommended Daily Limit (Monthly Credits / Workdays in Month)
     const baseDailyLimit = baseMonthlyCredits / calendar.totalWorkdays;
     const recommendedDailyLimit = totalMonthlyCredits / calendar.totalWorkdays;
-    // 3. Classify Sessions against Recommended Daily Limit (40-60% Heavy vs >60% Mega)
     const minExp = config.expensiveSessionMinPercent ?? 40;
     const maxExp = config.expensiveSessionMaxPercent ?? 60;
     const sessions = sessionsInput.map(s => {
@@ -827,7 +814,6 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
             expenseTier
         };
     });
-    // Aggregate daily, hourly, model, and workspace metrics
     const dailyMap = {};
     for (let d = 1; d <= calendar.daysInMonth; d++) {
         const ds = formatDateYMD(new Date(year, month, d));
@@ -848,7 +834,6 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
             contextBloatSessionsCount++;
             contextBloatCreditsWasted += s.post20TurnCredits > 0 ? s.post20TurnCredits : s.credits * 0.25;
         }
-        // Attribute turn-level timestamps accurately to their exact day and hour
         if (Array.isArray(s.turns) && s.turns.length > 0) {
             for (const t of s.turns) {
                 const bucket = dailyMap[t.dateStr];
@@ -876,7 +861,6 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
                 hourlyMessages[hr] += s.messages;
             }
         }
-        // Attribute session-level expensive chat markers to the session's primary day
         const primaryDayBucket = dailyMap[s.dateStr];
         if (primaryDayBucket) {
             if (s.expenseTier === 'heavy-40-60') {
@@ -890,7 +874,6 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
                 primaryDayBucket.topSessionTitle = s.title;
             }
         }
-        // Models inside session
         for (const [modelName, mStats] of Object.entries(s.modelsUsed)) {
             if (!modelAgg[modelName]) {
                 modelAgg[modelName] = {
@@ -905,7 +888,6 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
             const share = s.messages > 0 ? mStats.messages / s.messages : 1;
             modelAgg[modelName].tokens += Math.round(s.estimatedTokens * share);
         }
-        // Workspace aggregation
         const ws = s.workspaceName || 'Workspace';
         if (!workspaceAgg[ws]) {
             workspaceAgg[ws] = {
@@ -931,7 +913,6 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
             workspaceAgg[ws].totalExpensiveChats += 1;
         }
     }
-    // Supplement daily credits from persistent daily API quota ledger if a day had non-chat external API usage
     if (dailyQuotaLedger) {
         const sortedDates = Object.keys(dailyQuotaLedger).sort();
         for (let i = 1; i < sortedDates.length; i++) {
@@ -961,7 +942,6 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
     const todayBucket = dailyMap[todayStr];
     const todayUsedCredits = Math.round((todayBucket?.credits || 0) * 100) / 100;
     const usedBeforeToday = Math.max(0, Math.round((totalUsedCredits - todayUsedCredits) * 100) / 100);
-    // 4. Extra (Rollover Surplus) & Credit Debt Calculation
     const expectedUsedBeforeToday = Math.round(calendar.pastWorkdays * baseDailyLimit * 100) / 100;
     const netBalance = Math.round(((expectedUsedBeforeToday - usedBeforeToday) + extraCredits) * 100) / 100;
     const rolloverExtraCredits = Math.max(0, netBalance);
@@ -975,7 +955,6 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
     const activeDailyPercent = config.dailyPercentMode === 'standard' ? standardDailyPercent : adjustedDailyPercent;
     const monthlyExhausted = totalUsedCredits >= totalMonthlyCredits;
     const colorInfo = getColorInfo(activeDailyPercent, monthlyExhausted);
-    // Build Daily Series across the month
     const dailySeries = [];
     let runningUsed = 0;
     let runningBudget = 0;
@@ -1019,14 +998,12 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
             colorTier: dayColor.tier
         });
     }
-    // Build 24-Hour Series
     const hourlySeries = hourlyCredits.map((cr, hr) => ({
         hour: hr,
         label: `${String(hr).padStart(2, '0')}:00`,
         credits: Math.round(cr * 100) / 100,
         messages: hourlyMessages[hr]
     }));
-    // 5. Averages: Weekly, Workday, Work-Hour
     const elapsedWeeks = Math.max(1, currentDay / 7);
     const weeklyAverageCredits = Math.round((totalUsedCredits / elapsedWeeks) * 100) / 100;
     const weeklyAverageMessages = Math.round((sessionsTotalMessages / elapsedWeeks) * 10) / 10;
@@ -1037,7 +1014,6 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
     const workHourAverageMessages = Math.round((workdayAverageMessages / workHours) * 100) / 100;
     const activeHoursCount = Math.max(1, hourlyCredits.filter(c => c > 0).length);
     const activeHourAverageCredits = Math.round((totalUsedCredits / activeHoursCount) * 100) / 100;
-    // 6. Models & Workspaces summaries
     const models = Object.entries(modelAgg)
         .map(([model, m]) => ({
         model,
@@ -1056,7 +1032,6 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
         percentOfCredits: totalUsedCredits > 0 ? Math.round((w.credits / totalUsedCredits) * 1000) / 10 : 0
     }))
         .sort((a, b) => b.credits - a.credits || b.messages - a.messages);
-    // 7. Expensive Sessions Leaderboard & Counts
     const monthExpensive40to60 = sessions.filter(s => s.expenseTier === 'heavy-40-60').length;
     const monthExpensiveOver60 = sessions.filter(s => s.expenseTier === 'mega-60plus').length;
     const monthTotalExpensiveChats = monthExpensive40to60 + monthExpensiveOver60;
@@ -1066,7 +1041,6 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
     const activeTodayTopSession = sessions
         .filter(s => s.dateStr === todayStr || s.turns?.some(t => t.dateStr === todayStr))
         .sort((a, b) => b.credits - a.credits)[0];
-    // 8. Forecast & Smart Insights
     const projectedMonthlyCredits = Math.round(workdayAverageCredits * calendar.totalWorkdays * 100) / 100;
     const projectedEndBalance = Math.round((totalMonthlyCredits - projectedMonthlyCredits) * 100) / 100;
     let exhaustionDateStr = null;
@@ -1180,10 +1154,6 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
         insights
     };
 }
-/**
- * Computes multi-month history summaries (up to `monthsBack` months) and a detailed comparison
- * between the selected month (`selectedYear`, `selectedMonth`) and its immediately preceding month.
- */
 function computeHistoryComparison(config, realNow, selectedYear, selectedMonth, sessionsByMonth, currentMonthApiQuota, monthsBack = 6, monthlyArchives, dailyQuotaLedger) {
     const realYear = realNow.getFullYear();
     const realMonth = realNow.getMonth();

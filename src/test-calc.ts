@@ -10,6 +10,7 @@ import {
   getColorInfo,
   getMonthWorkdays,
   mineAllChatSessionsByMonth,
+  readWorkspaceName,
   replayJsonlMutationLog,
   resolveModelMultiplier,
   scanLocalChatSessions
@@ -158,6 +159,16 @@ function runTests() {
 
   const singleScan = scanLocalChatSessions(path.join(tmpUserDir, 'workspaceStorage'), 2026, 9, {});
   assert.strictEqual(singleScan.length, 2, 'scanLocalChatSessions should also discover sessions from parent User dir');
+
+  // Verify Remote-WSL workspace.json URI resolution
+  const wslHashDir = path.join(tmpUserDir, 'workspaceStorage', 'wslhash1');
+  fs.mkdirSync(wslHashDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(wslHashDir, 'workspace.json'),
+    JSON.stringify({ folder: 'vscode-remote://wsl+Ubuntu/home/pospisk/work-monorepo' }),
+    'utf8'
+  );
+  assert.strictEqual(readWorkspaceName(wslHashDir), 'work-monorepo', 'Should extract repo name from vscode-remote://wsl URI');
 
   fs.rmSync(tmpUserDir, { recursive: true, force: true });
 

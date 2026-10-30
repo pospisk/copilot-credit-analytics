@@ -2,11 +2,14 @@
   "name": "copilot-credit-analytics",
   "displayName": "Copilot Credit & Token Analytics",
   "description": "Monitors GitHub Copilot credit & token usage, calculates workday-based daily budgets, tracks extra credits & debt, identifies expensive 40-60%+ chat sessions, and visualizes model, workspace & multi-month history analytics.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "pospisk",
   "engines": {
     "vscode": "^1.85.0"
   },
+  "extensionKind": [
+    "ui"
+  ],
   "categories": [
     "Other",
     "Visualization"
