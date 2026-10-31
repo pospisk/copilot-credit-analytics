@@ -46,12 +46,21 @@ async function runTests() {
     assert.strictEqual(calOct.pastWorkdays, 10, 'Oct 1..14 2026 should have 10 past workdays');
     assert.strictEqual(calOct.elapsedWorkdays, 11, 'Oct 1..15 2026 should have 11 elapsed workdays');
     assert.strictEqual(calOct.remainingWorkdays, 12, 'Oct 15..31 2026 should have 12 remaining workdays');
-    // 2. Test Model Multipliers
+    // 2. Test Model Multipliers & Model Name Normalization / Grouping
     assert.strictEqual((0, tracker_1.resolveModelMultiplier)('claude-3.7-sonnet-thought'), 1.25);
     assert.strictEqual((0, tracker_1.resolveModelMultiplier)('Claude Sonnet 4.5'), 1);
     assert.strictEqual((0, tracker_1.resolveModelMultiplier)('claude-opus-4.5'), 3);
     assert.strictEqual((0, tracker_1.resolveModelMultiplier)('claude-opus-4'), 10);
     assert.strictEqual((0, tracker_1.resolveModelMultiplier)('gpt-4.1'), 0);
+    assert.strictEqual((0, tracker_1.normalizeModelName)('gpt-6-luna-*-0.5-credits'), 'gpt-6-luna');
+    assert.strictEqual((0, tracker_1.normalizeModelName)('gpt-6-luna-*-1.7-credits'), 'gpt-6-luna');
+    assert.strictEqual((0, tracker_1.normalizeModelName)('gpt-6-luna-*-1.4-credits'), 'gpt-6-luna');
+    assert.strictEqual((0, tracker_1.normalizeModelName)('GPT-6 Luna • 0.5 credits'), 'gpt-6-luna');
+    assert.strictEqual((0, tracker_1.normalizeModelName)('GPT-6 Luna • 18.2k tokens • 68.4 credits'), 'gpt-6-luna');
+    assert.strictEqual((0, tracker_1.normalizeModelName)('github.copilot-chat/gpt-6-luna'), 'gpt-6-luna');
+    assert.strictEqual((0, tracker_1.normalizeModelName)('claude-sonnet-4-5-20250929'), 'claude-sonnet-4.5');
+    assert.strictEqual((0, tracker_1.normalizeModelName)('Claude Sonnet 4 0.5 credits'), 'claude-sonnet-4');
+    assert.strictEqual((0, tracker_1.normalizeModelName)('gpt-6-luna-•-0.5-credits'), 'gpt-6-luna');
     // 3. Test Color Coding & Widget Background/Foreground Contrast Specs
     const greenSpec = (0, tracker_1.getColorInfo)(35);
     assert.strictEqual(greenSpec.tier, 'green');
@@ -88,19 +97,16 @@ async function runTests() {
                 ]
             }
         }),
-        // kind 1: update customTitle
         JSON.stringify({
             kind: 1,
             k: ['customTitle'],
             v: 'JSONL Replayed Session'
         }),
-        // kind 1: set result.details with explicit multiplier on req 0
         JSON.stringify({
             kind: 1,
             k: ['requests', 0, 'result'],
             v: { details: 'Claude Sonnet 4.5 • 1x', metadata: { usage: { totalTokens: 1800 } } }
         }),
-        // kind 2: append second request to requests array at index 1
         JSON.stringify({
             kind: 2,
             k: ['requests'],
@@ -119,7 +125,7 @@ async function runTests() {
     const replayed = (0, tracker_1.replayJsonlMutationLog)(jsonlLines);
     assert.strictEqual(replayed.customTitle, 'JSONL Replayed Session');
     assert.strictEqual(replayed.requests.length, 2, 'Should replay kind:0 + kind:2 into 2 requests');
-    // Test full filesystem mining across workspaceStorage + emptyWindowChatSessions
+    // Test full filesystem mining across workspaceStorage + emptyWindowChatSessions + AI Credits + Untitled workspace.json
     const tmpUserDir = fs.mkdtempSync(path.join(os.tmpdir(), 'copilot-user-dir-'));
     const hashDir = path.join(tmpUserDir, 'workspaceStorage', 'hash999');
     const chatDir = path.join(hashDir, 'chatSessions');
@@ -145,9 +151,44 @@ async function runTests() {
             ]
         }
     }), 'utf8');
+    // Add Untitled Workspace (User/Workspaces/<id>/workspace.json) + heavy 1,231-credit 18-turn session + GPT-6 Luna dynamic credit turns
+    const untitledWsStorageDir = path.join(tmpUserDir, 'Workspaces', '1761823456789');
+    fs.mkdirSync(untitledWsStorageDir, { recursive: true });
+    fs.writeFileSync(path.join(untitledWsStorageDir, 'workspace.json'), JSON.stringify({
+        folders: [{ path: '/Users/pospisk/_copilot-analytics' }]
+    }), 'utf8');
+    const untitledHashDir = path.join(tmpUserDir, 'workspaceStorage', 'hashUntitled1');
+    const untitledChatDir = path.join(untitledHashDir, 'chatSessions');
+    fs.mkdirSync(untitledChatDir, { recursive: true });
+    fs.writeFileSync(path.join(untitledHashDir, 'workspace.json'), JSON.stringify({
+        workspace: 'file:///c%3A/Users/pospisk/AppData/Roaming/Code/User/Workspaces/1761823456789/workspace.json'
+    }), 'utf8');
+    assert.strictEqual((0, tracker_1.readWorkspaceName)(untitledHashDir), '_copilot-analytics', 'Should resolve real folder name from User/Workspaces/<id>/workspace.json instead of workspace.json');
+    fs.writeFileSync(path.join(untitledHashDir, 'workspace.json'), JSON.stringify({
+        workspace: 'vscode-userdata:/c%3A/Users/pospisk/AppData/Roaming/Code/User/Workspaces/1761823456789/workspace.json'
+    }), 'utf8');
+    assert.strictEqual((0, tracker_1.readWorkspaceName)(untitledHashDir), '_copilot-analytics', 'Should also resolve single-slash vscode-userdata:/ untitled workspace URIs');
+    // 18-turn session totaling 1,231 credits (3 turns of 0.5, 1.7, 1.4 + 14 turns of 75 + 1 turn of 177.4 = 1231.0)
+    const turnCredits = [0.5, 1.7, 1.4, ...new Array(14).fill(75), 177.4];
+    const heavySessionRequests = turnCredits.map((cr, idx) => ({
+        requestId: `heavy-${idx}`,
+        timestamp: new Date(2026, 9, 25, 10, idx).getTime(),
+        message: { text: `Agent step ${idx + 1}` },
+        response: [{ value: 'Completed multi-file edit' }],
+        result: { details: idx % 2 === 0 ? `GPT-6 Luna • ${cr} credits` : `GPT-6 Luna * ${cr} credits` }
+    }));
+    fs.writeFileSync(path.join(untitledChatDir, 'heavy-1231.jsonl'), JSON.stringify({
+        kind: 0,
+        v: {
+            version: 3,
+            sessionId: 'heavy-1231',
+            customTitle: 'Marathon 1231 Credit Agent Session',
+            requests: heavySessionRequests
+        }
+    }), 'utf8');
     const minedByMonth = (0, tracker_1.mineAllChatSessionsByMonth)([tmpUserDir], new Date(2026, 8, 1).getTime(), {});
     const octMined = minedByMonth['2026-10'] || [];
-    assert.strictEqual(octMined.length, 2, 'Should mine both workspace .jsonl and emptyWindow .jsonl sessions');
+    assert.strictEqual(octMined.length, 3, 'Should mine all 3 October sessions');
     const wsSession = octMined.find(s => s.sessionId === 'jsonl-mut-1');
     assert.strictEqual(wsSession.workspaceName, 'payment-gateway');
     assert.strictEqual(wsSession.title, 'JSONL Replayed Session');
@@ -156,8 +197,15 @@ async function runTests() {
     const emptySession = octMined.find(s => s.sessionId === 'empty-win-1');
     assert.strictEqual(emptySession.workspaceName, 'Empty Window');
     assert.strictEqual(emptySession.credits, 0, 'GPT-4.1 0x should use 0 credits');
+    const heavySession = octMined.find(s => s.sessionId === 'heavy-1231');
+    assert.strictEqual(heavySession.workspaceName, '_copilot-analytics');
+    assert.strictEqual(heavySession.messages, 18);
+    assert.strictEqual(heavySession.credits, 1231, 'Should sum dynamic AI credits across all 18 turns to 1231 cr');
+    assert.deepStrictEqual(Object.keys(heavySession.modelsUsed), ['gpt-6-luna'], 'All GPT-6 Luna credit turns should group under single model key gpt-6-luna');
+    assert.strictEqual(heavySession.modelsUsed['gpt-6-luna'].messages, 18);
+    assert.strictEqual(heavySession.modelsUsed['gpt-6-luna'].credits, 1231);
     const singleScan = (0, tracker_1.scanLocalChatSessions)(path.join(tmpUserDir, 'workspaceStorage'), 2026, 9, {});
-    assert.strictEqual(singleScan.length, 2, 'scanLocalChatSessions should also discover sessions from parent User dir');
+    assert.strictEqual(singleScan.length, 3, 'scanLocalChatSessions should also discover sessions from parent User dir');
     // Verify Remote-WSL workspace.json URI resolution
     const wslHashDir = path.join(tmpUserDir, 'workspaceStorage', 'wslhash1');
     fs.mkdirSync(wslHashDir, { recursive: true });
@@ -167,7 +215,10 @@ async function runTests() {
     const candidateDirs = (0, tracker_1.getCandidateVSCodeUserDirs)(undefined, [tmpUserDir]);
     assert.ok(candidateDirs.includes(tmpUserDir), 'getCandidateVSCodeUserDirs should include extraPaths');
     const asyncMined1 = await (0, tracker_1.mineAllChatSessionsByMonthAsync)([tmpUserDir], new Date(2026, 8, 1).getTime(), {});
-    assert.strictEqual(asyncMined1['2026-10']?.length, 2, 'Async miner should find both sessions');
+    assert.strictEqual(asyncMined1['2026-10']?.length, 3, 'Async miner should find all 3 sessions');
+    const asyncHeavy = asyncMined1['2026-10']?.find(s => s.sessionId === 'heavy-1231');
+    assert.strictEqual(asyncHeavy.workspaceName, '_copilot-analytics', 'Async miner should resolve untitled workspace folders');
+    assert.strictEqual(asyncHeavy.credits, 1231);
     // Append a 3rd turn to jsonl-mut-1.jsonl and verify cache invalidates immediately via file size change
     fs.appendFileSync(path.join(chatDir, 'jsonl-mut-1.jsonl'), '\n' +
         JSON.stringify({

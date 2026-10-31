@@ -57,8 +57,42 @@ let refreshTimer;
 let activeRefreshPromise;
 let lastApiFetchMs = 0;
 let isUpdatingStatusColors = false;
+function getCurrentWindowWorkspaceOverrides(context) {
+    const overrides = {};
+    if (!context.storageUri) {
+        return overrides;
+    }
+    const hashName = path.basename(path.dirname(context.storageUri.fsPath));
+    if (!hashName) {
+        return overrides;
+    }
+    const folders = vscode.workspace.workspaceFolders;
+    let cleanName = '';
+    if (folders && folders.length > 0) {
+        const names = folders.map(f => f.name).filter(Boolean);
+        if (names.length === 1) {
+            cleanName = names[0];
+        }
+        else if (names.length === 2) {
+            cleanName = `${names[0]} + ${names[1]}`;
+        }
+        else if (names.length > 2) {
+            cleanName = `${names[0]} + ${names[1]} (+${names.length - 2})`;
+        }
+    }
+    if (!cleanName && vscode.workspace.name) {
+        const candidate = vscode.workspace.name.replace(/\s*\(Workspace\)$/i, '').trim();
+        if (candidate && candidate.toLowerCase() !== 'untitled' && candidate.toLowerCase() !== 'workspace.json') {
+            cleanName = candidate;
+        }
+    }
+    if (cleanName) {
+        overrides[hashName] = cleanName;
+    }
+    return overrides;
+}
 function activate(context) {
-    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    statusBarItem = vscode.window.createStatusBarItem('copilotAnalytics.statusBar', vscode.StatusBarAlignment.Right, -1000);
     statusBarItem.command = 'copilotAnalytics.showDashboard';
     statusBarItem.name = 'Copilot Credit & Daily Limit Monitor';
     statusBarItem.text = '$(sync~spin) Copilot: Mining Chats...';
@@ -111,10 +145,9 @@ function activate(context) {
         const primaryUserDir = path.dirname(path.dirname(context.globalStorageUri.fsPath));
         const userDirs = (0, tracker_1.getCandidateVSCodeUserDirs)(primaryUserDir, config.chatStoragePaths);
         lastScannedDirs = userDirs;
-        const earliestYear = Math.min(now.getFullYear(), selectedYear);
-        const earliestMonth = Math.min(now.getMonth() - HISTORY_MONTHS_COUNT, selectedMonth - 1);
-        const earliestDateMs = new Date(earliestYear, earliestMonth, 1, 0, 0, 0).getTime();
-        const sessionsByMonth = await (0, tracker_1.mineAllChatSessionsByMonthAsync)(userDirs, earliestDateMs, config.modelMultipliers);
+        const earliestDateMs = Math.min(new Date(now.getFullYear(), now.getMonth() - HISTORY_MONTHS_COUNT, 1, 0, 0, 0).getTime(), new Date(selectedYear, selectedMonth - 1, 1, 0, 0, 0).getTime());
+        const workspaceOverrides = getCurrentWindowWorkspaceOverrides(context);
+        const sessionsByMonth = await (0, tracker_1.mineAllChatSessionsByMonthAsync)(userDirs, earliestDateMs, config.modelMultipliers, workspaceOverrides);
         // 3. Compute analytics & history comparison
         latestHistoryComparison = (0, tracker_1.computeHistoryComparison)(config, now, selectedYear, selectedMonth, sessionsByMonth, apiQuota, HISTORY_MONTHS_COUNT, monthlyArchives, dailyLedger);
         currentMonthSnapshot =
@@ -265,7 +298,6 @@ async function syncStatusBarWidgetColors(snap, config) {
                     : undefined;
         return;
     }
-    // Use errorBackground token for Red, and warningBackground token for Green / Yellow / Orange
     const isRed = snap.colorTier === 'red';
     statusBarItem.backgroundColor = new vscode.ThemeColor(isRed ? 'statusBarItem.errorBackground' : 'statusBarItem.warningBackground');
     statusBarItem.color = snap.widgetFgHex;
@@ -328,8 +360,9 @@ async function updateStatusBar(snap, config) {
     md.appendMarkdown(`| **Expensive Chats Today** | **${snap.todayTotalExpensiveChats}** | \`40-60%\`: **${snap.todayExpensive40to60}** · \`>60%\`: **${snap.todayExpensiveOver60}** (Month: **${snap.monthTotalExpensiveChats}**) |\n`);
     md.appendMarkdown(`| **Monthly Progress** | \`${monthlyBar}\` | **${snap.totalUsedCredits.toFixed(1)} / ${snap.totalMonthlyCredits} cr** (${snap.monthlyUsedPercent.toFixed(1)}%) |\n\n`);
     md.appendMarkdown(`**Averages:** Weekly: **${snap.weeklyAverageCredits.toFixed(1)} cr** · Workday: **${snap.workdayAverageCredits.toFixed(1)} cr** · Work Hour: **${snap.workHourAverageCredits.toFixed(2)} cr/hr**\n\n`);
-    if (snap.models.length > 0) {
-        const topModels = snap.models
+    const chatModels = snap.models.filter(m => !m.model.startsWith('External'));
+    if (chatModels.length > 0) {
+        const topModels = chatModels
             .slice(0, 3)
             .map(m => `\`${m.model}\` (${m.messages} msgs, ${m.credits.toFixed(1)} cr)`)
             .join(' · ');
@@ -370,7 +403,8 @@ function openDashboardPanel(refreshAll) {
         else if (msg.type === 'stepMonth' && typeof msg.delta === 'number') {
             const now = new Date();
             const dt = new Date(selectedYear ?? now.getFullYear(), (selectedMonth ?? now.getMonth()) + msg.delta, 1);
-            if (dt.getFullYear() < now.getFullYear() || (dt.getFullYear() === now.getFullYear() && dt.getMonth() <= now.getMonth())) {
+            if (dt.getFullYear() < now.getFullYear() ||
+                (dt.getFullYear() === now.getFullYear() && dt.getMonth() <= now.getMonth())) {
                 selectedYear = dt.getFullYear();
                 selectedMonth = dt.getMonth();
                 await refreshAll(false);
@@ -427,7 +461,9 @@ async function exportAnalyticsReport(historyComp) {
             lines.push(`Daily,${d.dateStr},${d.isWorkday},${d.messages},${d.credits},${d.dailyPercent}%,${d.expensiveChats40to60},${d.expensiveChatsOver60},Limit:${d.recommendedLimit}`);
         }
         for (const m of snap.models) {
-            lines.push(`Model,"${m.model}",-,${m.messages},${m.credits},${m.percentOfCredits}%,-,-,${m.multiplier}x`);
+            const msgCell = m.model.startsWith('External') && m.messages === 0 ? '-' : String(m.messages);
+            const rateCell = m.model.startsWith('External') && m.messages === 0 ? '-' : `${m.multiplier}cr/msg`;
+            lines.push(`Model,"${m.model}",-,${msgCell},${m.credits},${m.percentOfCredits}%,-,-,${rateCell}`);
         }
         for (const s of snap.topExpensiveSessions) {
             lines.push(`Session,"${s.title.replace(/"/g, '""')}",${s.dateStr},${s.messages},${s.credits},${s.dailyLimitPercent}%,${s.expenseTier === 'heavy-40-60' ? 1 : 0},${s.expenseTier === 'mega-60plus' ? 1 : 0},"${s.workspaceName}"`);
@@ -470,14 +506,12 @@ function renderDashboardHtml(historyComp, config) {
     const dailyBarsSvg = snap.dailySeries
         .map((d, i) => {
         const x = padL + i * barStep + (barStep - barW) / 2;
-        const barH = d.credits > 0
-            ? Math.max(4, (d.credits / maxDailyCredits) * plotH)
-            : (d.isFuture ? 0 : 2);
+        const barH = d.credits > 0 ? Math.max(4, (d.credits / maxDailyCredits) * plotH) : d.isFuture ? 0 : 2;
         const y = padT + plotH - barH;
         const fill = d.isFuture
             ? 'rgba(148,163,184,0.10)'
             : d.credits > 0
-                ? (tierColors[d.colorTier] || '#22c55e')
+                ? tierColors[d.colorTier] || '#22c55e'
                 : 'rgba(148,163,184,0.25)';
         const opacity = d.isWorkday ? '0.92' : '0.45';
         const todayStroke = d.isToday && isViewingCurrentMonth ? 'stroke="#38bdf8" stroke-width="2"' : '';
@@ -490,7 +524,10 @@ function renderDashboardHtml(historyComp, config) {
           <text x="${(x + barW / 2).toFixed(1)}" y="${(markerY + 3.5).toFixed(1)}" text-anchor="middle" fill="#fff" font-size="9" font-weight="bold">${d.totalExpensiveChats}</text>
         `;
         }
-        const showDayLabel = d.dayOfMonth === 1 || d.dayOfMonth % 3 === 0 || (d.isToday && isViewingCurrentMonth) || d.dayOfMonth === snap.calendar.daysInMonth;
+        const showDayLabel = d.dayOfMonth === 1 ||
+            d.dayOfMonth % 3 === 0 ||
+            (d.isToday && isViewingCurrentMonth) ||
+            d.dayOfMonth === snap.calendar.daysInMonth;
         const dayLabel = showDayLabel
             ? `<text x="${(x + barW / 2).toFixed(1)}" y="${chartH - 10}" text-anchor="middle" fill="${d.isToday && isViewingCurrentMonth ? '#38bdf8' : '#94a3b8'}" font-size="10" font-weight="${d.isToday && isViewingCurrentMonth ? '700' : '400'}">${d.dayOfMonth}</text>`
             : '';
@@ -545,7 +582,6 @@ function renderDashboardHtml(historyComp, config) {
             }
         }
         else {
-            // First month of usage: compare against the ideal workday budget trajectory so graph is never blank
             const selBudgetPt = snap.dailySeries[d - 1];
             if (selBudgetPt) {
                 const iy = padT + plotH - (selBudgetPt.cumulativeBudget / maxCompareCum) * plotH;
@@ -554,7 +590,6 @@ function renderDashboardHtml(historyComp, config) {
         }
         const selPt = snap.dailySeries[d - 1];
         if (selPt && !selPt.isFuture) {
-            // Scale cumulative line smoothly if API total exceeds local sessions so current day matches totalUsedCredits
             const cumVal = selPt.isToday && snap.localMinedCredits === 0 && snap.totalUsedCredits > 0
                 ? snap.totalUsedCredits
                 : selPt.cumulativeUsed;
@@ -612,11 +647,10 @@ function renderDashboardHtml(historyComp, config) {
     const hourlyBarsSvg = snap.hourlySeries
         .map((h, i) => {
         const x = padL + i * hrStep + (hrStep - hrBarW) / 2;
-        // Show bar height for either paid credits or 0x-model message activity
         const metricVal = h.credits > 0 ? h.credits : h.messages * 0.15;
         const barH = metricVal > 0 ? Math.max(4, (metricVal / maxHourCr) * plotH) : 2;
         const y = padT + plotH - barH;
-        const fill = h.credits > 0 ? '#38bdf8' : (h.messages > 0 ? '#64748b' : 'rgba(148,163,184,0.18)');
+        const fill = h.credits > 0 ? '#38bdf8' : h.messages > 0 ? '#64748b' : 'rgba(148,163,184,0.18)';
         const showLabel = i % 3 === 0;
         return `
         <g>
@@ -685,6 +719,9 @@ function renderDashboardHtml(historyComp, config) {
         const modelsText = Object.entries(s.modelsUsed)
             .map(([m, st]) => `${escapeHtml(m)} (${st.messages})`)
             .join(', ');
+        const crossMonthNote = s.totalSessionCredits !== undefined && s.totalSessionCredits > s.credits + 0.01
+            ? `<div class="muted" style="font-size:11px;">Whole session: ${s.totalSessionCredits.toFixed(2)} cr (${s.totalSessionMessages ?? s.messages} turns)</div>`
+            : '';
         return `
         <tr>
           <td>#${idx + 1}</td>
@@ -695,18 +732,25 @@ function renderDashboardHtml(historyComp, config) {
           <td><span class="ws-tag">${escapeHtml(s.workspaceName)}</span></td>
           <td>${s.dateStr} <span class="muted">· ${s.durationMinutes}m</span></td>
           <td>${s.messages} turns ${bloatBadge}</td>
-          <td><strong>${s.credits.toFixed(2)} cr</strong> <span class="muted">(~${(s.cumulativeContextTokens / 1000).toFixed(1)}k ctx tok)</span></td>
+          <td>
+            <strong>${s.credits.toFixed(2)} cr</strong> <span class="muted">(~${(s.cumulativeContextTokens / 1000).toFixed(1)}k ctx tok)</span>
+            ${crossMonthNote}
+          </td>
           <td>${badge}</td>
         </tr>
       `;
     })
         .join('');
     const modelsRows = snap.models
-        .map(m => `
+        .map(m => {
+        const isExternal = m.model.startsWith('External') && m.messages === 0;
+        const rateBadge = isExternal ? `<span class="muted">-</span>` : `<span class="ws-tag">${m.multiplier} cr/msg</span>`;
+        const msgText = isExternal ? '-' : String(m.messages);
+        return `
       <tr>
         <td><strong>${escapeHtml(m.model)}</strong></td>
-        <td><span class="ws-tag">${m.multiplier}x cr/msg</span></td>
-        <td>${m.messages}</td>
+        <td>${rateBadge}</td>
+        <td>${msgText}</td>
         <td><strong>${m.credits.toFixed(2)} cr</strong></td>
         <td>${m.estimatedTokens > 0 ? `~${(m.estimatedTokens / 1000).toFixed(1)}k` : '-'}</td>
         <td style="min-width:140px;">
@@ -718,7 +762,8 @@ function renderDashboardHtml(historyComp, config) {
           </div>
         </td>
       </tr>
-    `)
+    `;
+    })
         .join('');
     const workspaceRows = snap.workspaces
         .map(w => `
@@ -1243,7 +1288,7 @@ function renderDashboardHtml(historyComp, config) {
               <thead>
                 <tr>
                   <th>Model Name</th>
-                  <th>Multiplier</th>
+                  <th>Avg Cost</th>
                   <th>Messages</th>
                   <th>Credits</th>
                   <th>Est. Tokens</th>

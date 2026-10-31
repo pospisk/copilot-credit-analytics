@@ -38,6 +38,7 @@ exports.formatDateYMD = formatDateYMD;
 exports.formatMonthKey = formatMonthKey;
 exports.getMonthShortLabel = getMonthShortLabel;
 exports.getColorInfo = getColorInfo;
+exports.parseNumericValue = parseNumericValue;
 exports.normalizeModelName = normalizeModelName;
 exports.resolveModelMultiplier = resolveModelMultiplier;
 exports.getMonthWorkdays = getMonthWorkdays;
@@ -159,19 +160,53 @@ function getColorInfo(percent, monthlyExhausted = false) {
         label: 'Healthy'
     };
 }
+const CREDIT_NUM_SRC = '(?:\\d{1,3}(?:,\\d{3})+(?:\\.\\d+)?|\\d+(?:\\.\\d+|,\\d{1,2})?)';
+const STRIP_INLINE_CREDITS_RE = new RegExp(`(?:[\\s*-]+|\\s*[\\(\\[])?(?:~|<|≤)?\\s*${CREDIT_NUM_SRC}(?:\\s*(?:ai[-\\s]*)?(?:credits?|cr|x)|-(?:ai-)?credits?)\\b[\\)\\]]?.*$`, 'i');
+const EXTRACT_CREDITS_RE = new RegExp(`(?:~|<|≤)?\\s*(${CREDIT_NUM_SRC})(?:\\s*(?:ai[-\\s]*)?(?:credits?|cr)|-(?:ai-)?credits?)\\b`, 'i');
+function parseNumericValue(rawNum) {
+    const trimmed = rawNum.replace(/[\s\u00a0]/g, '');
+    if (/^\d{1,3}(?:,\d{3})+(?:\.\d+)?$/.test(trimmed)) {
+        return parseFloat(trimmed.replace(/,/g, ''));
+    }
+    if (/^\d+,\d{1,2}$/.test(trimmed)) {
+        return parseFloat(trimmed.replace(',', '.'));
+    }
+    return parseFloat(trimmed.replace(/,/g, ''));
+}
 function normalizeModelName(rawModel) {
     if (!rawModel || typeof rawModel !== 'string') {
         return 'claude-sonnet-4';
     }
-    const cleaned = rawModel
-        .trim()
-        .replace(/^(copilot\/|copilot-|github\/|models\/|anthropic\/|openai\/|google\/|azure\/)/i, '')
-        .replace(/\(preview\)/gi, '')
-        .replace(/\s+/g, '-')
+    let s = rawModel.trim();
+    const autoMatch = s.match(/^auto\s*\(([^)]+)\)/i);
+    if (autoMatch) {
+        s = autoMatch[1].trim();
+    }
+    // Keep only the model segment prior to bullet / star / pipe cost & token badges
+    s = s.split(/\s*(?:[•·∙⋅|]|\s+\*\s+|\s+—\s+|\s+–\s+)\s*/)[0] || '';
+    // Strip any vendor / extension prefix (e.g. copilot/..., github.copilot-chat/..., openai/...)
+    s = s.replace(/^.*\//, '').replace(/^(copilot-|github-copilot-)/i, '');
+    // Strip inline or hyphenated credit / multiplier / free badges (e.g. "*-0.5-credits", "- 1.7 credits", "(3x)")
+    s = s
+        .replace(STRIP_INLINE_CREDITS_RE, '')
+        .replace(/(?:[\s*-]+|\s*[\(\[])(?:free|included)\b[\)\]]?.*$/i, '')
+        .replace(/\s*[\(\[](?:preview|beta|experimental|latest|new)[\)\]]/gi, '')
+        .replace(/[\s_]+/g, '-')
+        .replace(/[()\[\]*•·∙⋅|]+/g, '-')
         .replace(/-+/g, '-')
         .replace(/^-|-$/g, '')
         .toLowerCase();
-    return cleaned || 'claude-sonnet-4';
+    // Canonicalize Claude hyphenated minor versions (e.g. claude-sonnet-4-5 -> claude-sonnet-4.5)
+    s = s
+        .replace(/\bclaude-(opus|sonnet|haiku)-(\d+)-(\d+)\b/g, 'claude-$1-$2.$3')
+        .replace(/\bclaude-(\d+)-(\d+)-(opus|sonnet|haiku)\b/g, 'claude-$1.$2-$3');
+    // Strip trailing snapshot dates and preview/latest suffixes so identical models group together
+    s = s
+        .replace(/-(?:preview|latest|beta|experimental)(?:-\d{2,8})*$/i, '')
+        .replace(/-20\d{2}-\d{2}-\d{2}$/, '')
+        .replace(/-20\d{6}$/, '')
+        .replace(/^-|-$/g, '');
+    return s || 'claude-sonnet-4';
 }
 function resolveModelMultiplier(modelName, customMap) {
     const clean = normalizeModelName(modelName);
@@ -237,19 +272,18 @@ function getMonthWorkdays(year, month, currentDay, workDays = [1, 2, 3, 4, 5], h
 }
 /**
  * Queries GitHub's internal Copilot user quota API using an OAuth token from VS Code's GitHub authentication provider.
- * Note: GitHub's personal Copilot API returns ONLY aggregate monthly entitlement & used count (no daily/model/session breakdown).
  */
 function fetchCopilotInternalQuota(accessToken) {
-    return new Promise((resolve) => {
+    return new Promise(resolve => {
         const req = https.request('https://api.github.com/copilot_internal/user', {
             method: 'GET',
             headers: {
-                'Authorization': `Bearer ${accessToken}`,
-                'User-Agent': 'VSCode-Copilot-Credit-Analytics/0.3.2',
-                'Accept': 'application/json'
+                Authorization: `Bearer ${accessToken}`,
+                'User-Agent': 'VSCode-Copilot-Credit-Analytics/0.3.3',
+                Accept: 'application/json'
             },
             timeout: 6000
-        }, (res) => {
+        }, res => {
             if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
                 resolve(undefined);
                 return;
@@ -259,7 +293,8 @@ function fetchCopilotInternalQuota(accessToken) {
             res.on('end', () => {
                 try {
                     const data = JSON.parse(body);
-                    const pi = data?.quota_snapshots?.premium_interactions || data?.quota_snapshots?.chat;
+                    const qs = data?.quota_snapshots;
+                    const pi = qs?.premium_interactions || qs?.credits || qs?.ai_credits || qs?.chat;
                     if (!pi) {
                         resolve(undefined);
                         return;
@@ -267,10 +302,14 @@ function fetchCopilotInternalQuota(accessToken) {
                     const entitlement = typeof pi.entitlement === 'number' ? pi.entitlement : 300;
                     const remaining = typeof pi.quota_remaining === 'number'
                         ? pi.quota_remaining
-                        : (typeof pi.remaining === 'number' ? pi.remaining : entitlement);
+                        : typeof pi.remaining === 'number'
+                            ? pi.remaining
+                            : entitlement;
                     const used = typeof pi.used === 'number'
                         ? pi.used
-                        : Math.max(0, entitlement - remaining);
+                        : typeof pi.credits_used === 'number'
+                            ? pi.credits_used
+                            : Math.max(0, entitlement - remaining);
                     resolve({
                         login: data.login,
                         plan: data.copilot_plan || data.access_type_sku,
@@ -295,11 +334,6 @@ function fetchCopilotInternalQuota(accessToken) {
         req.end();
     });
 }
-/**
- * Discovers Windows drive mount roots inside WSL (e.g. `/mnt/c`, `/c`, `/mnt/d`)
- * by reading `/proc/mounts` (pure in-memory kernel pseudo-file, zero child processes)
- * plus standard WSL mount locations.
- */
 function getWindowsMountRootsInWSL() {
     const mounts = new Set(['/mnt/c', '/c', '/mnt/d', '/d']);
     try {
@@ -327,8 +361,7 @@ function getWindowsMountRootsInWSL() {
     return Array.from(mounts);
 }
 /**
- * Discovers candidate VS Code User directories across macOS, Windows, Linux, AND Remote-WSL
- * (both WSL `~/.vscode-server/data/User` and Windows host `<mount>/Users/<WinUser>/AppData/Roaming/Code/User`).
+ * Discovers candidate VS Code User directories across macOS, Windows, Linux, AND Remote-WSL.
  */
 function getCandidateVSCodeUserDirs(primaryUserDir, extraPaths) {
     const dirs = new Set();
@@ -363,8 +396,6 @@ function getCandidateVSCodeUserDirs(primaryUserDir, extraPaths) {
     }
     else {
         standardRoots.push(path.join(home, '.vscode-server', 'data', 'User'), path.join(home, '.vscode-server-insiders', 'data', 'User'), path.join(home, '.config', 'Code', 'User'), path.join(home, '.config', 'Code - Insiders', 'User'));
-        // Remote-WSL bridge: VS Code's Chat UI runs in the Windows client and writes chatSessions/*.jsonl
-        // to %APPDATA%\Code\User on the Windows filesystem (mounted at /mnt/c, /c, etc.).
         const skipWinUsers = new Set(['Public', 'Default', 'Default User', 'All Users']);
         for (const mountRoot of getWindowsMountRootsInWSL()) {
             const usersDir = path.join(mountRoot, 'Users');
@@ -391,42 +422,205 @@ function getCandidateVSCodeUserDirs(primaryUserDir, extraPaths) {
     }
     return Array.from(dirs);
 }
-/**
- * Extracts a clean project/repository name from workspace.json, handling both local file:// URIs
- * and Remote-WSL / SSH URIs (e.g. vscode-remote://wsl+Ubuntu/home/user/my-project).
- */
-function readWorkspaceName(hashDir) {
-    const wsJsonPath = path.join(hashDir, 'workspace.json');
+function cleanUriToPath(uriOrPath) {
     try {
-        if (fs.existsSync(wsJsonPath)) {
-            return parseWorkspaceJsonContent(fs.readFileSync(wsJsonPath, 'utf8'));
+        return decodeURIComponent(uriOrPath)
+            .replace(/^[a-zA-Z][a-zA-Z0-9+.-]+:(?:\/\/[^/]*)?/, '')
+            .replace(/\\/g, '/')
+            .replace(/\/+$/, '');
+    }
+    catch {
+        return uriOrPath
+            .replace(/^[a-zA-Z][a-zA-Z0-9+.-]+:(?:\/\/[^/]*)?/, '')
+            .replace(/\\/g, '/')
+            .replace(/\/+$/, '');
+    }
+}
+function extractNameFromWorkspaceConfigObject(rawConfig) {
+    try {
+        const cfg = JSON.parse(rawConfig);
+        if (typeof cfg?.name === 'string' && cfg.name.trim() && cfg.name.trim().toLowerCase() !== 'workspace.json') {
+            return cfg.name.trim();
+        }
+        if (Array.isArray(cfg?.folders) && cfg.folders.length > 0) {
+            const names = [];
+            for (const f of cfg.folders) {
+                if (typeof f?.name === 'string' && f.name.trim()) {
+                    names.push(f.name.trim());
+                    continue;
+                }
+                const rawTarget = typeof f?.uri === 'string' ? f.uri : typeof f?.path === 'string' ? f.path : '';
+                if (!rawTarget || rawTarget === '.') {
+                    continue;
+                }
+                const seg = cleanUriToPath(rawTarget).split('/').filter(Boolean).pop();
+                if (seg && seg.toLowerCase() !== 'workspace.json') {
+                    names.push(seg.replace(/\.code-workspace$/i, ''));
+                }
+            }
+            if (names.length === 1) {
+                return names[0];
+            }
+            if (names.length === 2) {
+                return `${names[0]} + ${names[1]}`;
+            }
+            if (names.length > 2) {
+                return `${names[0]} + ${names[1]} (+${names.length - 2})`;
+            }
         }
     }
     catch {
-        // ignore malformed workspace.json
+        // ignore malformed workspace config
     }
-    return 'Workspace';
+    return undefined;
 }
-function parseWorkspaceJsonContent(raw) {
+function getCandidateWorkspaceConfigPaths(withoutScheme, hashDir) {
+    const candidates = [];
+    const wsMatch = withoutScheme.match(/\/Workspaces\/([^/]+)\/workspace\.json$/i);
+    if (wsMatch && hashDir) {
+        const userDir = path.dirname(path.dirname(hashDir));
+        candidates.push(path.join(userDir, 'Workspaces', wsMatch[1], 'workspace.json'));
+    }
+    const winDriveMatch = withoutScheme.match(/^\/?([a-zA-Z]):\/(.*)$/);
+    if (winDriveMatch) {
+        const drive = winDriveMatch[1].toLowerCase();
+        const rest = winDriveMatch[2];
+        if (process.platform === 'win32') {
+            candidates.push(`${drive}:/${rest}`);
+        }
+        else {
+            candidates.push(`/mnt/${drive}/${rest}`, `/${drive}/${rest}`);
+        }
+    }
+    else if (withoutScheme.startsWith('/')) {
+        candidates.push(withoutScheme);
+    }
+    return candidates;
+}
+function fallbackNameForWorkspaceJsonUri(withoutScheme, overrideName) {
+    if (overrideName && overrideName.trim()) {
+        return overrideName.trim();
+    }
+    const parts = withoutScheme.split('/').filter(Boolean);
+    for (let i = parts.length - 2; i >= 0; i--) {
+        const seg = parts[i];
+        const lower = seg.toLowerCase();
+        if (lower === '.vscode' ||
+            lower === 'workspaces' ||
+            lower === 'user' ||
+            lower === 'code' ||
+            /^\d+$/.test(seg) ||
+            /^[0-9a-f]{16,}$/i.test(seg)) {
+            continue;
+        }
+        return seg.replace(/\.code-workspace$/i, '');
+    }
+    return 'Untitled Workspace';
+}
+function parseWorkspaceJsonContent(raw, hashDir, readRefFileSync, overrideName) {
     try {
         const content = JSON.parse(raw);
-        const uriStr = content.folder || content.workspace || '';
+        const wsField = typeof content.workspace === 'string'
+            ? content.workspace
+            : typeof content.workspace?.configURIPath === 'string'
+                ? content.workspace.configURIPath
+                : '';
+        const uriStr = content.folder || wsField || '';
         if (uriStr) {
-            const decoded = decodeURIComponent(uriStr);
-            const withoutScheme = decoded
-                .replace(/^[a-zA-Z0-9+.-]+:\/\/[^/]*/, '')
-                .replace(/\\/g, '/')
-                .replace(/\/+$/, '');
+            const withoutScheme = cleanUriToPath(uriStr);
             const base = withoutScheme.split('/').filter(Boolean).pop() || '';
+            if (base.toLowerCase() === 'workspace.json') {
+                if (readRefFileSync) {
+                    for (const candidate of getCandidateWorkspaceConfigPaths(withoutScheme, hashDir)) {
+                        const refRaw = readRefFileSync(candidate);
+                        if (refRaw) {
+                            const extracted = extractNameFromWorkspaceConfigObject(refRaw);
+                            if (extracted) {
+                                return extracted;
+                            }
+                        }
+                    }
+                }
+                return fallbackNameForWorkspaceJsonUri(withoutScheme, overrideName);
+            }
             if (base) {
-                return base.replace(/\.code-workspace$/i, '');
+                const cleaned = base.replace(/\.code-workspace$/i, '');
+                if (cleaned.toLowerCase() === 'untitled' && overrideName) {
+                    return overrideName;
+                }
+                return cleaned || overrideName || 'Workspace';
             }
         }
     }
     catch {
         // ignore
     }
-    return 'Workspace';
+    return overrideName || 'Workspace';
+}
+async function parseWorkspaceJsonContentAsync(raw, hashDir, overrideName) {
+    try {
+        const content = JSON.parse(raw);
+        const wsField = typeof content.workspace === 'string'
+            ? content.workspace
+            : typeof content.workspace?.configURIPath === 'string'
+                ? content.workspace.configURIPath
+                : '';
+        const uriStr = content.folder || wsField || '';
+        if (uriStr) {
+            const withoutScheme = cleanUriToPath(uriStr);
+            const base = withoutScheme.split('/').filter(Boolean).pop() || '';
+            if (base.toLowerCase() === 'workspace.json') {
+                for (const candidate of getCandidateWorkspaceConfigPaths(withoutScheme, hashDir)) {
+                    try {
+                        const refRaw = await fs.promises.readFile(candidate, 'utf8');
+                        const extracted = extractNameFromWorkspaceConfigObject(refRaw);
+                        if (extracted) {
+                            return extracted;
+                        }
+                    }
+                    catch {
+                        // try next candidate
+                    }
+                }
+                return fallbackNameForWorkspaceJsonUri(withoutScheme, overrideName);
+            }
+            if (base) {
+                const cleaned = base.replace(/\.code-workspace$/i, '');
+                if (cleaned.toLowerCase() === 'untitled' && overrideName) {
+                    return overrideName;
+                }
+                return cleaned || overrideName || 'Workspace';
+            }
+        }
+    }
+    catch {
+        // ignore
+    }
+    return overrideName || 'Workspace';
+}
+/**
+ * Extracts a clean project/repository name from workspace.json, handling single folders,
+ * Remote-WSL / SSH URIs, .code-workspace files, and untitled multi-root workspaces (`User/Workspaces/<id>/workspace.json`).
+ */
+function readWorkspaceName(hashDir, overrideName) {
+    const wsJsonPath = path.join(hashDir, 'workspace.json');
+    try {
+        if (fs.existsSync(wsJsonPath)) {
+            const raw = fs.readFileSync(wsJsonPath, 'utf8');
+            return parseWorkspaceJsonContent(raw, hashDir, p => {
+                try {
+                    return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : undefined;
+                }
+                catch {
+                    return undefined;
+                }
+            }, overrideName);
+        }
+    }
+    catch {
+        // ignore malformed workspace.json
+    }
+    return overrideName || 'Workspace';
 }
 function getByPath(root, keys) {
     let curr = root;
@@ -468,12 +662,7 @@ function deleteByPath(root, keys) {
     }
 }
 /**
- * Replays VS Code's objectMutationLog (.jsonl) format:
- * - kind 0: initial full state snapshot under `v`
- * - kind 1: set property at key-path `k` to `v`
- * - kind 2: splice/truncate-and-append array at key-path `k` from index `i` with items `v`
- * - kind 3: delete property at key-path `k`
- * Also supports legacy flat JSONL lines containing `requests` or single prompt objects.
+ * Replays VS Code's objectMutationLog (.jsonl) format (kind 0, 1, 2, 3) plus flat JSONL fallbacks.
  */
 function replayJsonlMutationLog(rawContent) {
     const lines = rawContent.split(/\r?\n/);
@@ -506,7 +695,7 @@ function replayJsonlMutationLog(rawContent) {
                     setByPath(state, obj.k, target);
                 }
                 if (Array.isArray(target)) {
-                    const items = Array.isArray(obj.v) ? obj.v : (obj.v !== undefined ? [obj.v] : []);
+                    const items = Array.isArray(obj.v) ? obj.v : obj.v !== undefined ? [obj.v] : [];
                     if (typeof obj.i === 'number' && obj.i >= 0) {
                         target.splice(obj.i, Math.max(0, target.length - obj.i), ...items);
                     }
@@ -563,46 +752,162 @@ function extractTextLength(node, depth = 0) {
     }
     return 0;
 }
-function extractModelAndMultiplier(req, sessionState, customMultipliers) {
-    let explicitMultiplier;
-    let modelCandidate = '';
-    const detailsStr = typeof req?.result?.details === 'string' ? req.result.details.trim() : '';
-    if (detailsStr) {
-        const multMatch = detailsStr.match(/(?:[•·|-]|\()\s*(\d+(?:\.\d+)?)\s*x\b/i);
-        if (multMatch) {
-            explicitMultiplier = parseFloat(multMatch[1]);
-        }
-        const modelPart = detailsStr
-            .replace(/(?:[•·|-]|\()?\s*\d+(?:\.\d+)?\s*x\)?.*$/i, '')
-            .trim();
-        if (modelPart) {
-            modelCandidate = normalizeModelName(modelPart);
+function readNumericCredits(obj) {
+    if (!obj || typeof obj !== 'object') {
+        return undefined;
+    }
+    for (const key of ['credits', 'aiCredits', 'totalCredits', 'copilotCredits', 'creditsUsed', 'usedCredits']) {
+        const val = obj[key];
+        if (typeof val === 'number' && isFinite(val) && val >= 0) {
+            return val;
         }
     }
-    if (!modelCandidate) {
-        const rawId = req?.result?.metadata?.modelId ||
-            req?.result?.metadata?.model ||
-            req?.modelId ||
-            req?.selectedModel?.metadata?.id ||
-            req?.selectedModel?.metadata?.name ||
-            req?.selectedModel?.identifier ||
-            sessionState?.inputState?.selectedModel?.metadata?.id ||
-            sessionState?.inputState?.selectedModel?.metadata?.name ||
-            sessionState?.inputState?.selectedModel?.identifier ||
-            sessionState?.selectedModel?.metadata?.id ||
-            sessionState?.selectedModel?.identifier ||
-            '';
-        modelCandidate = normalizeModelName(rawId);
+    if (obj.cost && typeof obj.cost === 'object') {
+        for (const key of ['credits', 'aiCredits', 'totalCredits']) {
+            const val = obj.cost[key];
+            if (typeof val === 'number' && isFinite(val) && val >= 0) {
+                return val;
+            }
+        }
+    }
+    return undefined;
+}
+function parseCreditsFromDetailsString(detailsStr) {
+    let explicitCredits;
+    let explicitMultiplier;
+    let explicitTokens;
+    const creditMatch = detailsStr.match(EXTRACT_CREDITS_RE);
+    if (creditMatch) {
+        const parsed = parseNumericValue(creditMatch[1]);
+        if (!isNaN(parsed) && parsed >= 0) {
+            explicitCredits = parsed;
+        }
+    }
+    else if (/(?:[•·∙⋅|]|\s\*\s|\()\s*(?:free|included)\b/i.test(detailsStr)) {
+        explicitCredits = 0;
+    }
+    const multMatch = detailsStr.match(/(?:[•·∙⋅|*-]|\()\s*(\d+(?:\.\d+)?)\s*x\b/i);
+    if (multMatch) {
+        const parsedMult = parseFloat(multMatch[1]);
+        if (!isNaN(parsedMult) && parsedMult >= 0) {
+            explicitMultiplier = parsedMult;
+        }
+    }
+    const tokMatch = detailsStr.match(/(\d[\d,]*(?:\.\d+)?)\s*([km])?\s*tokens?\b/i);
+    if (tokMatch) {
+        const baseTok = parseNumericValue(tokMatch[1]);
+        const unit = (tokMatch[2] || '').toLowerCase();
+        const scale = unit === 'm' ? 1_000_000 : unit === 'k' ? 1_000 : 1;
+        if (!isNaN(baseTok) && baseTok > 0) {
+            explicitTokens = Math.round(baseTok * scale);
+        }
+    }
+    const firstSeg = detailsStr.split(/\s*(?:[•·∙⋅|]|\s+\*\s+|\s+—\s+|\s+–\s+)\s*/)[0] || '';
+    const modelPart = firstSeg
+        .replace(STRIP_INLINE_CREDITS_RE, '')
+        .replace(/(?:[\s*-]+|\s*[\(\[])(?:free|included)\b[\)\]]?.*$/i, '')
+        .replace(/[\s*-]+$/g, '')
+        .trim();
+    return { explicitCredits, explicitMultiplier, explicitTokens, modelPart };
+}
+function extractTurnCostAndModel(req, sessionState, customMultipliers) {
+    const resultObj = req?.result || (!Array.isArray(req?.response) ? req?.response?.result : undefined);
+    const detailsStr = typeof resultObj?.details === 'string'
+        ? resultObj.details.trim()
+        : typeof req?.details === 'string'
+            ? req.details.trim()
+            : '';
+    let explicitCredits;
+    let explicitMultiplier;
+    let detailsTokens;
+    let modelCandidate = '';
+    if (detailsStr) {
+        const parsed = parseCreditsFromDetailsString(detailsStr);
+        explicitCredits = parsed.explicitCredits;
+        explicitMultiplier = parsed.explicitMultiplier;
+        detailsTokens = parsed.explicitTokens;
+        if (parsed.modelPart) {
+            modelCandidate = normalizeModelName(parsed.modelPart);
+        }
+    }
+    const metaCredits = readNumericCredits(resultObj) ??
+        readNumericCredits(resultObj?.metadata) ??
+        readNumericCredits(resultObj?.metadata?.usage) ??
+        readNumericCredits(req?.usage) ??
+        readNumericCredits(req?.modelState) ??
+        readNumericCredits(req);
+    if (metaCredits !== undefined) {
+        explicitCredits = explicitCredits !== undefined ? Math.max(explicitCredits, metaCredits) : metaCredits;
+    }
+    if (Array.isArray(resultObj?.metadata?.toolCallRounds)) {
+        let roundCreditsSum = 0;
+        let foundRoundCredits = false;
+        for (const round of resultObj.metadata.toolCallRounds) {
+            const rc = readNumericCredits(round) ??
+                readNumericCredits(round?.usage) ??
+                (typeof round?.details === 'string' ? parseCreditsFromDetailsString(round.details).explicitCredits : undefined);
+            if (rc !== undefined) {
+                roundCreditsSum += rc;
+                foundRoundCredits = true;
+            }
+        }
+        if (foundRoundCredits) {
+            explicitCredits = explicitCredits !== undefined ? Math.max(explicitCredits, roundCreditsSum) : roundCreditsSum;
+        }
+    }
+    const fallbackModelId = resultObj?.metadata?.modelId ||
+        resultObj?.metadata?.model ||
+        req?.modelId ||
+        req?.selectedModel?.metadata?.id ||
+        req?.selectedModel?.metadata?.name ||
+        req?.selectedModel?.identifier ||
+        sessionState?.inputState?.selectedModel?.metadata?.id ||
+        sessionState?.inputState?.selectedModel?.metadata?.name ||
+        sessionState?.inputState?.selectedModel?.identifier ||
+        sessionState?.selectedModel?.metadata?.id ||
+        sessionState?.selectedModel?.identifier ||
+        '';
+    if (!modelCandidate || modelCandidate === 'auto') {
+        const resolvedFallback = fallbackModelId ? normalizeModelName(fallbackModelId) : '';
+        if (resolvedFallback && resolvedFallback !== 'auto') {
+            modelCandidate = resolvedFallback;
+        }
+        else if (!modelCandidate) {
+            modelCandidate = normalizeModelName(fallbackModelId);
+        }
     }
     const cleanUserOverrides = {};
     for (const [k, v] of Object.entries(customMultipliers || {})) {
         cleanUserOverrides[normalizeModelName(k)] = v;
     }
     const hasExplicitUserOverride = Object.keys(cleanUserOverrides).some(k => modelCandidate.includes(k) && exports.DEFAULT_MODEL_MULTIPLIERS[k] !== cleanUserOverrides[k]);
-    const multiplier = !hasExplicitUserOverride && explicitMultiplier !== undefined && !isNaN(explicitMultiplier)
-        ? explicitMultiplier
-        : resolveModelMultiplier(modelCandidate, customMultipliers);
-    return { model: modelCandidate, multiplier };
+    const fallbackMultiplier = resolveModelMultiplier(modelCandidate, customMultipliers);
+    if (hasExplicitUserOverride) {
+        return {
+            model: modelCandidate,
+            multiplier: fallbackMultiplier,
+            credits: fallbackMultiplier,
+            hasExplicitCost: false,
+            detailsTokens
+        };
+    }
+    if (explicitCredits !== undefined && !isNaN(explicitCredits)) {
+        return {
+            model: modelCandidate,
+            multiplier: explicitMultiplier ?? explicitCredits,
+            credits: explicitCredits,
+            hasExplicitCost: true,
+            detailsTokens
+        };
+    }
+    const mult = explicitMultiplier !== undefined && !isNaN(explicitMultiplier) ? explicitMultiplier : fallbackMultiplier;
+    return {
+        model: modelCandidate,
+        multiplier: mult,
+        credits: mult,
+        hasExplicitCost: explicitMultiplier !== undefined,
+        detailsTokens
+    };
 }
 function parseSessionObject(state, fallbackSessionId, workspaceName, fallbackMtimeMs, multipliers) {
     if (!state || typeof state !== 'object') {
@@ -619,47 +924,62 @@ function parseSessionObject(state, fallbackSessionId, workspaceName, fallbackMti
         : fallbackMtimeMs - requests.length * 45000;
     const turns = [];
     requests.forEach((req, idx) => {
-        if (!req || req.isCanceled) {
+        if (!req) {
             return;
         }
         const promptText = typeof req.message === 'string'
             ? req.message
-            : (req.message?.text ||
-                (Array.isArray(req.message?.parts)
-                    ? req.message.parts.map((p) => p?.text || '').join(' ')
-                    : '') ||
+            : req.message?.text ||
+                (Array.isArray(req.message?.parts) ? req.message.parts.map((p) => p?.text || '').join(' ') : '') ||
                 req.prompt ||
-                '');
+                '';
         if (!title && promptText) {
             title = promptText.replace(/\s+/g, ' ').trim();
         }
         const responseChars = extractTextLength(req.response);
-        const toolRoundChars = Array.isArray(req.result?.metadata?.toolCallRounds)
-            ? extractTextLength(req.result.metadata.toolCallRounds)
+        const resultObj = req?.result || (!Array.isArray(req?.response) ? req?.response?.result : undefined);
+        const toolRoundChars = Array.isArray(resultObj?.metadata?.toolCallRounds)
+            ? extractTextLength(resultObj.metadata.toolCallRounds)
             : 0;
-        const { model, multiplier } = extractModelAndMultiplier(req, state, multipliers);
+        const { model, multiplier, credits, hasExplicitCost, detailsTokens } = extractTurnCostAndModel(req, state, multipliers);
+        if (req.isCanceled && !hasExplicitCost && responseChars === 0 && toolRoundChars === 0) {
+            return;
+        }
         const ts = typeof req.timestamp === 'number' && req.timestamp > 1000000000000
             ? req.timestamp
-            : (typeof req.requestDate === 'number' && req.requestDate > 1000000000000
+            : typeof req.requestDate === 'number' && req.requestDate > 1000000000000
                 ? req.requestDate
-                : baseCreationMs + idx * 45000);
+                : baseCreationMs + idx * 45000;
         const dt = new Date(ts);
-        const usageMeta = req.result?.metadata?.usage || req.usage;
-        const exactTokens = typeof usageMeta?.totalTokens === 'number'
+        const usageMeta = resultObj?.metadata?.usage || req.usage;
+        let exactTokens = typeof usageMeta?.totalTokens === 'number'
             ? usageMeta.totalTokens
-            : (typeof usageMeta?.promptTokens === 'number' || typeof usageMeta?.completionTokens === 'number'
+            : typeof usageMeta?.promptTokens === 'number' || typeof usageMeta?.completionTokens === 'number'
                 ? (usageMeta.promptTokens || 0) + (usageMeta.completionTokens || 0)
-                : 0);
+                : 0;
+        if (exactTokens === 0 && Array.isArray(resultObj?.metadata?.toolCallRounds)) {
+            for (const r of resultObj.metadata.toolCallRounds) {
+                const ru = r?.usage;
+                if (typeof ru?.totalTokens === 'number') {
+                    exactTokens += ru.totalTokens;
+                }
+                else if (typeof ru?.promptTokens === 'number' || typeof ru?.completionTokens === 'number') {
+                    exactTokens += (ru.promptTokens || 0) + (ru.completionTokens || 0);
+                }
+            }
+        }
         const estimatedTokens = exactTokens > 0
             ? exactTokens
-            : Math.max(60, Math.ceil((promptText.length + responseChars + toolRoundChars) / 4));
+            : detailsTokens && detailsTokens > 0
+                ? detailsTokens
+                : Math.max(60, Math.ceil((promptText.length + responseChars + toolRoundChars) / 4));
         turns.push({
             timestamp: ts,
             dateStr: formatDateYMD(dt),
             hour: dt.getHours(),
             model,
             multiplier,
-            credits: multiplier,
+            credits: req.isCanceled && !hasExplicitCost ? 0 : credits,
             promptChars: promptText.length,
             responseChars: responseChars + toolRoundChars,
             estimatedTokens,
@@ -669,6 +989,27 @@ function parseSessionObject(state, fallbackSessionId, workspaceName, fallbackMti
     if (turns.length === 0) {
         return undefined;
     }
+    const sessionLevelCredits = readNumericCredits(state) ??
+        readNumericCredits(state.usage) ??
+        readNumericCredits(state.stats) ??
+        readNumericCredits(state.metadata);
+    if (sessionLevelCredits !== undefined) {
+        const sumTurns = turns.reduce((acc, t) => acc + t.credits, 0);
+        if (sessionLevelCredits > sumTurns + 0.01) {
+            if (sumTurns > 0) {
+                const ratio = sessionLevelCredits / sumTurns;
+                for (const t of turns) {
+                    t.credits = Math.round(t.credits * ratio * 1000) / 1000;
+                }
+            }
+            else {
+                const perTurn = sessionLevelCredits / turns.length;
+                for (const t of turns) {
+                    t.credits = Math.round(perTurn * 1000) / 1000;
+                }
+            }
+        }
+    }
     return {
         sessionId,
         title: (title || 'Copilot Chat Session').slice(0, 95),
@@ -676,7 +1017,7 @@ function parseSessionObject(state, fallbackSessionId, workspaceName, fallbackMti
         turns
     };
 }
-function buildMonthlySessionRecord(sessionId, title, workspaceName, monthTurns, totalHistoricalTurnsBeforeMonth = 0) {
+function buildMonthlySessionRecord(sessionId, title, workspaceName, monthTurns, totalHistoricalTurnsBeforeMonth = 0, totalSessionCredits, totalSessionMessages) {
     if (monthTurns.length === 0) {
         return undefined;
     }
@@ -712,6 +1053,7 @@ function buildMonthlySessionRecord(sessionId, title, workspaceName, monthTurns, 
         'claude-sonnet-4';
     const totalThreadTurns = totalHistoricalTurnsBeforeMonth + sorted.length;
     const hasContextBloat = totalThreadTurns > 20 || cumulativeContextTokens > 60000;
+    const roundedMonthCredits = Math.round(credits * 100) / 100;
     return {
         sessionId,
         title,
@@ -721,7 +1063,9 @@ function buildMonthlySessionRecord(sessionId, title, workspaceName, monthTurns, 
         endTime,
         durationMinutes,
         messages: sorted.length,
-        credits: Math.round(credits * 100) / 100,
+        credits: roundedMonthCredits,
+        totalSessionCredits: totalSessionCredits !== undefined ? Math.round(totalSessionCredits * 100) / 100 : roundedMonthCredits,
+        totalSessionMessages: totalSessionMessages ?? sorted.length,
         estimatedTokens: directTokens,
         cumulativeContextTokens,
         modelsUsed,
@@ -754,6 +1098,8 @@ function groupParsedSessionsByMonth(parsedEntries) {
     const byMonth = {};
     for (const session of parsedById.values()) {
         const sortedTurns = [...session.turns].sort((a, b) => a.timestamp - b.timestamp);
+        const totalSessionCredits = sortedTurns.reduce((sum, t) => sum + t.credits, 0);
+        const totalSessionMessages = sortedTurns.length;
         const monthTurnGroups = new Map();
         sortedTurns.forEach((turn, idx) => {
             const mKey = turn.dateStr.slice(0, 7);
@@ -765,7 +1111,7 @@ function groupParsedSessionsByMonth(parsedEntries) {
             grp.turns.push(turn);
         });
         for (const [mKey, grp] of monthTurnGroups.entries()) {
-            const rec = buildMonthlySessionRecord(session.sessionId, session.title, session.workspaceName, grp.turns, grp.priorCount);
+            const rec = buildMonthlySessionRecord(session.sessionId, session.title, session.workspaceName, grp.turns, grp.priorCount, totalSessionCredits, totalSessionMessages);
             if (rec) {
                 if (!byMonth[mKey]) {
                     byMonth[mKey] = [];
@@ -780,7 +1126,7 @@ function groupParsedSessionsByMonth(parsedEntries) {
  * Non-blocking async chat session miner optimized for Remote-WSL (`/mnt/c` 9P filesystem)
  * with bounded concurrency and `(mtimeMs, size)` caching.
  */
-async function mineAllChatSessionsByMonthAsync(userDirs, earliestTimestampMs, multipliers) {
+async function mineAllChatSessionsByMonthAsync(userDirs, earliestTimestampMs, multipliers, workspaceNameOverrides) {
     const fsp = fs.promises;
     const multipliersKey = JSON.stringify(multipliers || {});
     const sessionFiles = [];
@@ -821,20 +1167,20 @@ async function mineAllChatSessionsByMonthAsync(userDirs, earliestTimestampMs, mu
         catch {
             hashEntries = [];
         }
-        // Scan workspaceStorage hash folders in parallel batches of 24 to minimize WSL /mnt/c 9P latency
         const BATCH = 24;
         for (let i = 0; i < hashEntries.length; i += BATCH) {
             const slice = hashEntries.slice(i, i + BATCH);
             await Promise.all(slice.map(async (hashName) => {
                 const hashDir = path.join(wsRoot, hashName);
                 const chatDir = path.join(hashDir, 'chatSessions');
+                const overrideName = workspaceNameOverrides?.[hashName];
                 await collectChatDirFiles(chatDir, async () => {
                     try {
                         const rawWs = await fsp.readFile(path.join(hashDir, 'workspace.json'), 'utf8');
-                        return parseWorkspaceJsonContent(rawWs);
+                        return await parseWorkspaceJsonContentAsync(rawWs, hashDir, overrideName);
                     }
                     catch {
-                        return 'Workspace';
+                        return overrideName || 'Workspace';
                     }
                 });
             }));
@@ -892,7 +1238,7 @@ async function mineAllChatSessionsByMonthAsync(userDirs, earliestTimestampMs, mu
 /**
  * Synchronous chat session miner (used by unit tests and single-folder utilities).
  */
-function mineAllChatSessionsByMonth(userDirs, earliestTimestampMs, multipliers) {
+function mineAllChatSessionsByMonth(userDirs, earliestTimestampMs, multipliers, workspaceNameOverrides) {
     const multipliersKey = JSON.stringify(multipliers || {});
     const sessionFiles = [];
     for (const userDir of userDirs) {
@@ -924,7 +1270,7 @@ function mineAllChatSessionsByMonth(userDirs, earliestTimestampMs, multipliers) 
                 if (files.length === 0) {
                     continue;
                 }
-                const wsName = readWorkspaceName(hashDir);
+                const wsName = readWorkspaceName(hashDir, workspaceNameOverrides?.[hashName]);
                 for (const f of files) {
                     const fp = path.join(chatDir, f);
                     try {
@@ -1100,7 +1446,8 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
                 primaryDayBucket.topSessionTitle = s.title;
             }
         }
-        for (const [modelName, mStats] of Object.entries(s.modelsUsed)) {
+        for (const [rawModelKey, mStats] of Object.entries(s.modelsUsed)) {
+            const modelName = normalizeModelName(rawModelKey);
             if (!modelAgg[modelName]) {
                 modelAgg[modelName] = {
                     multiplier: resolveModelMultiplier(modelName, config.modelMultipliers),
@@ -1144,7 +1491,9 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
         for (let i = 1; i < sortedDates.length; i++) {
             const ds = sortedDates[i];
             const prevDs = sortedDates[i - 1];
-            if (ds.slice(0, 7) === prevDs.slice(0, 7) && dailyMap[ds]) {
+            if (ds.slice(0, 7) === prevDs.slice(0, 7) &&
+                dailyMap[ds] &&
+                Math.round((Date.parse(ds) - Date.parse(prevDs)) / 86_400_000) === 1) {
                 const apiDelta = Math.max(0, dailyQuotaLedger[ds] - dailyQuotaLedger[prevDs]);
                 if (apiDelta > dailyMap[ds].credits) {
                     dailyMap[ds].credits = apiDelta;
@@ -1153,14 +1502,12 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
         }
     }
     const localMinedCredits = Math.round(sessionsTotalCredits * 100) / 100;
-    const totalUsedCredits = apiQuota && apiQuota.used > localMinedCredits
-        ? apiQuota.used
-        : localMinedCredits;
+    const totalUsedCredits = apiQuota && apiQuota.used > localMinedCredits ? apiQuota.used : localMinedCredits;
     if (apiQuota && apiQuota.used > localMinedCredits + 0.5) {
         const externalCredits = Math.round((apiQuota.used - localMinedCredits) * 100) / 100;
         modelAgg['External / Non-Chat Copilot Usage'] = {
-            multiplier: 1,
-            messages: Math.ceil(externalCredits),
+            multiplier: 0,
+            messages: 0,
             credits: externalCredits,
             tokens: 0
         };
@@ -1169,7 +1516,7 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
     const todayUsedCredits = Math.round((todayBucket?.credits || 0) * 100) / 100;
     const usedBeforeToday = Math.max(0, Math.round((totalUsedCredits - todayUsedCredits) * 100) / 100);
     const expectedUsedBeforeToday = Math.round(calendar.pastWorkdays * baseDailyLimit * 100) / 100;
-    const netBalance = Math.round(((expectedUsedBeforeToday - usedBeforeToday) + extraCredits) * 100) / 100;
+    const netBalance = Math.round((expectedUsedBeforeToday - usedBeforeToday + extraCredits) * 100) / 100;
     const rolloverExtraCredits = Math.max(0, netBalance);
     const creditDebt = Math.max(0, -netBalance);
     const remainingPoolEnteringToday = Math.max(0, totalMonthlyCredits - usedBeforeToday);
@@ -1177,7 +1524,9 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
     const standardDailyPercent = recommendedDailyLimit > 0 ? Math.round((todayUsedCredits / recommendedDailyLimit) * 1000) / 10 : 0;
     const adjustedDailyPercent = effectiveDailyLimit > 0
         ? Math.round((todayUsedCredits / effectiveDailyLimit) * 1000) / 10
-        : (todayUsedCredits > 0 ? 100 : 0);
+        : todayUsedCredits > 0
+            ? 100
+            : 0;
     const activeDailyPercent = config.dailyPercentMode === 'standard' ? standardDailyPercent : adjustedDailyPercent;
     const monthlyExhausted = totalUsedCredits >= totalMonthlyCredits;
     const colorInfo = getColorInfo(activeDailyPercent, monthlyExhausted);
@@ -1241,15 +1590,18 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
     const activeHoursCount = Math.max(1, hourlyCredits.filter(c => c > 0).length);
     const activeHourAverageCredits = Math.round((totalUsedCredits / activeHoursCount) * 100) / 100;
     const models = Object.entries(modelAgg)
-        .map(([model, m]) => ({
-        model,
-        multiplier: m.multiplier,
-        messages: m.messages,
-        credits: Math.round(m.credits * 100) / 100,
-        estimatedTokens: m.tokens,
-        percentOfCredits: totalUsedCredits > 0 ? Math.round((m.credits / totalUsedCredits) * 1000) / 10 : 0,
-        percentOfMessages: sessionsTotalMessages > 0 ? Math.round((m.messages / sessionsTotalMessages) * 1000) / 10 : 0
-    }))
+        .map(([model, m]) => {
+        const avgRate = m.messages > 0 ? Math.round((m.credits / m.messages) * 100) / 100 : m.multiplier;
+        return {
+            model,
+            multiplier: avgRate,
+            messages: m.messages,
+            credits: Math.round(m.credits * 100) / 100,
+            estimatedTokens: m.tokens,
+            percentOfCredits: totalUsedCredits > 0 ? Math.round((m.credits / totalUsedCredits) * 1000) / 10 : 0,
+            percentOfMessages: sessionsTotalMessages > 0 ? Math.round((m.messages / sessionsTotalMessages) * 1000) / 10 : 0
+        };
+    })
         .sort((a, b) => b.credits - a.credits || b.messages - a.messages);
     const workspaces = Object.values(workspaceAgg)
         .map(w => ({
@@ -1289,7 +1641,7 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
     for (const m of models) {
         if (m.multiplier > 1 && m.messages > 0 && !m.model.startsWith('External')) {
             const savingsPerCall = m.multiplier - 1;
-            highMultiplierSavingsEstimate += (m.messages * 0.5) * savingsPerCall;
+            highMultiplierSavingsEstimate += m.messages * 0.5 * savingsPerCall;
         }
     }
     highMultiplierSavingsEstimate = Math.round(highMultiplierSavingsEstimate * 100) / 100;
@@ -1307,7 +1659,7 @@ function computeAnalytics(config, now, sessionsInput, apiQuota, dailyQuotaLedger
         insights.push(`Long Thread Tax: ${contextBloatSessionsCount} marathon session(s) (>20 turns) spent ~${contextBloatCreditsWasted.toFixed(1)} credits after turn #20. Starting a fresh chat (/new) saves context tokens.`);
     }
     if (highMultiplierSavingsEstimate >= 2) {
-        insights.push(`Model Optimizer: Switching 50% of high-multiplier (>1x) model requests to 1x models (Claude Sonnet / Gemini Pro) or 0x models (GPT-4.1 / GPT-4o) would save ~${highMultiplierSavingsEstimate.toFixed(1)} credits/month.`);
+        insights.push(`Model Optimizer: Switching 50% of high-cost (>1 cr/msg) model requests to lighter models would save ~${highMultiplierSavingsEstimate.toFixed(1)} credits/month.`);
     }
     if (exhaustionDateStr) {
         insights.push(`Burn Rate Forecast: At your current workday average (${workdayAverageCredits.toFixed(1)} cr/day), your monthly credits will run out around ${exhaustionDateStr}.`);
@@ -1405,6 +1757,15 @@ function computeHistoryComparison(config, realNow, selectedYear, selectedMonth, 
                 fetchedAt: arch.updatedAt
             };
         }
+        else if (!config.overrideApiEntitlement && currentMonthApiQuota && currentMonthApiQuota.entitlement > 0) {
+            quotaForMonth = {
+                entitlement: currentMonthApiQuota.entitlement,
+                used: 0,
+                remaining: currentMonthApiQuota.entitlement,
+                unlimited: currentMonthApiQuota.unlimited,
+                fetchedAt: currentMonthApiQuota.fetchedAt
+            };
+        }
         return computeAnalytics(config, refDate, monthSessions, quotaForMonth, dailyQuotaLedger);
     };
     const selectedSnapshot = buildSnapshotForMonth(selectedYear, selectedMonth);
@@ -1477,7 +1838,9 @@ function computeHistoryComparison(config, realNow, selectedYear, selectedMonth, 
     const momSameDayDeltaCredits = Math.round((sameDaySelectedCredits - sameDayPreviousCredits) * 100) / 100;
     const momSameDayDeltaPercent = sameDayPreviousCredits > 0
         ? Math.round(((sameDaySelectedCredits - sameDayPreviousCredits) / sameDayPreviousCredits) * 1000) / 10
-        : (sameDaySelectedCredits > 0 ? 100 : 0);
+        : sameDaySelectedCredits > 0
+            ? 100
+            : 0;
     const momWorkdayAvgDeltaCredits = Math.round((selectedSnapshot.workdayAverageCredits - previousSnapshot.workdayAverageCredits) * 100) / 100;
     const momWorkdayAvgDeltaPercent = previousSnapshot.workdayAverageCredits > 0
         ? Math.round(((selectedSnapshot.workdayAverageCredits - previousSnapshot.workdayAverageCredits) /
