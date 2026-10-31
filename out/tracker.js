@@ -279,7 +279,7 @@ function fetchCopilotInternalQuota(accessToken) {
             method: 'GET',
             headers: {
                 Authorization: `Bearer ${accessToken}`,
-                'User-Agent': 'VSCode-Copilot-Credit-Analytics/0.3.3',
+                'User-Agent': 'VSCode-Copilot-Credit-Analytics/0.3.4',
                 Accept: 'application/json'
             },
             timeout: 6000

@@ -485,10 +485,10 @@ function renderDashboardHtml(historyComp, config) {
     const nowKey = (0, tracker_1.formatMonthKey)(new Date().getFullYear(), new Date().getMonth());
     const isViewingCurrentMonth = historyComp.selectedMonthKey === nowKey;
     const tierColors = {
-        green: '#22c55e',
-        yellow: '#eab308',
-        orange: '#f97316',
-        red: '#ef4444'
+        green: 'var(--green)',
+        yellow: 'var(--yellow)',
+        orange: 'var(--orange)',
+        red: 'var(--red)'
     };
     const chartW = 760;
     const chartH = 220;
@@ -509,15 +509,15 @@ function renderDashboardHtml(historyComp, config) {
         const barH = d.credits > 0 ? Math.max(4, (d.credits / maxDailyCredits) * plotH) : d.isFuture ? 0 : 2;
         const y = padT + plotH - barH;
         const fill = d.isFuture
-            ? 'rgba(148,163,184,0.10)'
+            ? 'var(--chart-future)'
             : d.credits > 0
-                ? tierColors[d.colorTier] || '#22c55e'
-                : 'rgba(148,163,184,0.25)';
+                ? tierColors[d.colorTier] || 'var(--green)'
+                : 'var(--chart-empty)';
         const opacity = d.isWorkday ? '0.92' : '0.45';
-        const todayStroke = d.isToday && isViewingCurrentMonth ? 'stroke="#38bdf8" stroke-width="2"' : '';
+        const todayStroke = d.isToday && isViewingCurrentMonth ? 'stroke="var(--accent)" stroke-width="2"' : '';
         let expMarker = '';
         if (d.totalExpensiveChats > 0) {
-            const badgeColor = d.expensiveChatsOver60 > 0 ? '#ef4444' : '#f97316';
+            const badgeColor = d.expensiveChatsOver60 > 0 ? 'var(--red)' : 'var(--orange)';
             const markerY = Math.max(12, y - 8);
             expMarker = `
           <circle cx="${(x + barW / 2).toFixed(1)}" cy="${markerY.toFixed(1)}" r="7" fill="${badgeColor}" />
@@ -529,7 +529,7 @@ function renderDashboardHtml(historyComp, config) {
             (d.isToday && isViewingCurrentMonth) ||
             d.dayOfMonth === snap.calendar.daysInMonth;
         const dayLabel = showDayLabel
-            ? `<text x="${(x + barW / 2).toFixed(1)}" y="${chartH - 10}" text-anchor="middle" fill="${d.isToday && isViewingCurrentMonth ? '#38bdf8' : '#94a3b8'}" font-size="10" font-weight="${d.isToday && isViewingCurrentMonth ? '700' : '400'}">${d.dayOfMonth}</text>`
+            ? `<text x="${(x + barW / 2).toFixed(1)}" y="${chartH - 10}" text-anchor="middle" fill="${d.isToday && isViewingCurrentMonth ? 'var(--accent)' : 'var(--chart-label)'}" font-size="10" font-weight="${d.isToday && isViewingCurrentMonth ? '700' : '400'}">${d.dayOfMonth}</text>`
             : '';
         const tooltip = `${d.dateStr} (${d.weekdayName}${d.isWorkday ? ' - Workday' : ' - Weekend/Holiday'}): ${d.credits} cr (${d.dailyPercent}% of limit) | ${d.messages} msgs | Expensive chats: ${d.expensiveChats40to60} (40-60%), ${d.expensiveChatsOver60} (>60%)`;
         return `
@@ -558,10 +558,10 @@ function renderDashboardHtml(historyComp, config) {
         if (d.isToday && snap.totalUsedCredits > d.cumulativeUsed + 0.5) {
             const apiY = padT + plotH - (snap.totalUsedCredits / maxCum) * plotH;
             liveApiDotSvg = `
-        <circle cx="${cx.toFixed(1)}" cy="${apiY.toFixed(1)}" r="5" fill="#38bdf8" stroke="#0f172a" stroke-width="1.5">
+        <circle cx="${cx.toFixed(1)}" cy="${apiY.toFixed(1)}" r="5" fill="var(--accent)" stroke="var(--card)" stroke-width="1.5">
           <title>GitHub API Total Used: ${snap.totalUsedCredits.toFixed(1)} cr</title>
         </circle>
-        <text x="${Math.min(chartW - padR - 4, cx + 8).toFixed(1)}" y="${(apiY + 4).toFixed(1)}" fill="#38bdf8" font-size="10" font-weight="600">API: ${snap.totalUsedCredits.toFixed(0)} cr</text>
+        <text x="${Math.min(chartW - padR - 4, cx + 8).toFixed(1)}" y="${(apiY + 4).toFixed(1)}" fill="var(--accent)" font-size="10" font-weight="600">API: ${snap.totalUsedCredits.toFixed(0)} cr</text>
       `;
         }
     });
@@ -597,7 +597,7 @@ function renderDashboardHtml(historyComp, config) {
             selectedCumPoints.push(`${cx.toFixed(1)},${sy.toFixed(1)}`);
         }
         if (d === 1 || d % 5 === 0 || d === 31) {
-            compareDayMarkersSvg.push(`<text x="${cx.toFixed(1)}" y="${chartH - 10}" text-anchor="middle" fill="#94a3b8" font-size="10">D${d}</text>`);
+            compareDayMarkersSvg.push(`<text x="${cx.toFixed(1)}" y="${chartH - 10}" text-anchor="middle" fill="var(--chart-label)" font-size="10">D${d}</text>`);
         }
     }
     // --- SVG 4: History Comparison Graph B — 6-Month Historical Credits & Expensive Chats Bar Chart ---
@@ -613,29 +613,29 @@ function renderDashboardHtml(historyComp, config) {
         const usedH = Math.max(mh.usedCredits > 0 ? 4 : 0, (mh.usedCredits / maxMonthHistoryCr) * plotH);
         const usedY = padT + plotH - usedH;
         const barColor = mh.usedPercent >= 100
-            ? '#ef4444'
+            ? 'var(--red)'
             : mh.usedPercent >= 85
-                ? '#f97316'
+                ? 'var(--orange)'
                 : mh.isSelected
-                    ? '#38bdf8'
-                    : '#22c55e';
-        const strokeAttr = mh.isSelected ? 'stroke="#f8fafc" stroke-width="2"' : '';
+                    ? 'var(--accent)'
+                    : 'var(--green)';
+        const strokeAttr = mh.isSelected ? 'stroke="var(--selected-stroke)" stroke-width="2"' : '';
         let expBadge = '';
         if (mh.totalExpensiveChats > 0) {
             const by = Math.max(14, usedY - 18);
             expBadge = `
-          <rect x="${(x + mBarW / 2 - 18).toFixed(1)}" y="${(by - 9).toFixed(1)}" width="36" height="14" rx="7" fill="rgba(249,115,22,0.25)" stroke="#f97316" stroke-width="1" />
-          <text x="${(x + mBarW / 2).toFixed(1)}" y="${(by + 1).toFixed(1)}" text-anchor="middle" fill="#fb923c" font-size="9" font-weight="bold">🔥${mh.totalExpensiveChats}</text>
+          <rect x="${(x + mBarW / 2 - 18).toFixed(1)}" y="${(by - 9).toFixed(1)}" width="36" height="14" rx="7" fill="rgba(249,115,22,0.20)" stroke="var(--orange)" stroke-width="1" />
+          <text x="${(x + mBarW / 2).toFixed(1)}" y="${(by + 1).toFixed(1)}" text-anchor="middle" fill="var(--pill-orange-fg)" font-size="9" font-weight="bold">🔥${mh.totalExpensiveChats}</text>
         `;
         }
         return `
         <g style="cursor:pointer;" onclick="selectMonth('${mh.monthKey}')">
           <title>${mh.label}: ${mh.usedCredits.toFixed(1)} / ${mh.totalMonthlyCredits} cr (${mh.usedPercent.toFixed(1)}%) | Workday Avg: ${mh.workdayAverageCredits.toFixed(2)} cr/d | Expensive Chats: ${mh.totalExpensiveChats} (Click to inspect month)</title>
-          <rect x="${x.toFixed(1)}" y="${capY.toFixed(1)}" width="${mBarW.toFixed(1)}" height="${capH.toFixed(1)}" rx="4" fill="rgba(148,163,184,0.12)" />
+          <rect x="${x.toFixed(1)}" y="${capY.toFixed(1)}" width="${mBarW.toFixed(1)}" height="${capH.toFixed(1)}" rx="4" fill="var(--chart-cap)" />
           <rect x="${x.toFixed(1)}" y="${usedY.toFixed(1)}" width="${mBarW.toFixed(1)}" height="${usedH.toFixed(1)}" rx="4" fill="${barColor}" ${strokeAttr} />
-          <text x="${(x + mBarW / 2).toFixed(1)}" y="${Math.max(12, usedY - 4).toFixed(1)}" text-anchor="middle" fill="#e2e8f0" font-size="10" font-weight="600">${mh.usedCredits.toFixed(0)} cr</text>
+          <text x="${(x + mBarW / 2).toFixed(1)}" y="${Math.max(12, usedY - 4).toFixed(1)}" text-anchor="middle" fill="var(--chart-value)" font-size="10" font-weight="600">${mh.usedCredits.toFixed(0)} cr</text>
           ${expBadge}
-          <text x="${(x + mBarW / 2).toFixed(1)}" y="${chartH - 10}" text-anchor="middle" fill="${mh.isSelected ? '#38bdf8' : '#94a3b8'}" font-size="10.5" font-weight="${mh.isSelected ? '700' : '500'}">${mh.label}</text>
+          <text x="${(x + mBarW / 2).toFixed(1)}" y="${chartH - 10}" text-anchor="middle" fill="${mh.isSelected ? 'var(--accent)' : 'var(--chart-label)'}" font-size="10.5" font-weight="${mh.isSelected ? '700' : '500'}">${mh.label}</text>
         </g>
       `;
     })
@@ -650,13 +650,13 @@ function renderDashboardHtml(historyComp, config) {
         const metricVal = h.credits > 0 ? h.credits : h.messages * 0.15;
         const barH = metricVal > 0 ? Math.max(4, (metricVal / maxHourCr) * plotH) : 2;
         const y = padT + plotH - barH;
-        const fill = h.credits > 0 ? '#38bdf8' : h.messages > 0 ? '#64748b' : 'rgba(148,163,184,0.18)';
+        const fill = h.credits > 0 ? 'var(--accent)' : h.messages > 0 ? '#64748b' : 'var(--chart-empty)';
         const showLabel = i % 3 === 0;
         return `
         <g>
           <title>${h.label} — ${h.credits} credits, ${h.messages} messages</title>
           <rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${hrBarW.toFixed(1)}" height="${barH.toFixed(1)}" rx="3" fill="${fill}" fill-opacity="0.88" />
-          ${showLabel ? `<text x="${(x + hrBarW / 2).toFixed(1)}" y="${chartH - 10}" text-anchor="middle" fill="#94a3b8" font-size="10">${h.hour}h</text>` : ''}
+          ${showLabel ? `<text x="${(x + hrBarW / 2).toFixed(1)}" y="${chartH - 10}" text-anchor="middle" fill="var(--chart-label)" font-size="10">${h.hour}h</text>` : ''}
         </g>
       `;
     })
@@ -667,7 +667,7 @@ function renderDashboardHtml(historyComp, config) {
         const balColor = mh.endBalance >= 0 ? 'pill-green' : 'pill-red';
         const balText = mh.endBalance >= 0 ? `+${mh.endBalance.toFixed(1)} Extra` : `${mh.endBalance.toFixed(1)} Debt`;
         return `
-        <tr style="${mh.isSelected ? 'background:rgba(56,189,248,0.10);' : ''}">
+        <tr style="${mh.isSelected ? 'background:rgba(56,189,248,0.12);' : ''}">
           <td>
             <strong>${mh.label}</strong>
             ${mh.isCurrentMonth ? '<span class="ws-tag" style="margin-left:6px;">Current</span>' : ''}
@@ -756,7 +756,7 @@ function renderDashboardHtml(historyComp, config) {
         <td style="min-width:140px;">
           <div style="display:flex;align-items:center;gap:8px;">
             <div class="progress-track" style="flex:1;height:8px;">
-              <div class="progress-fill" style="width:${Math.min(100, m.percentOfCredits)}%;background:#38bdf8;"></div>
+              <div class="progress-fill" style="width:${Math.min(100, m.percentOfCredits)}%;background:var(--accent);"></div>
             </div>
             <span style="font-size:11px;width:38px;text-align:right;">${m.percentOfCredits.toFixed(1)}%</span>
           </div>
@@ -785,6 +785,7 @@ function renderDashboardHtml(historyComp, config) {
         .join('');
     const momDeltaSign = historyComp.momSameDayDeltaCredits >= 0 ? '+' : '';
     const momDeltaColor = historyComp.momSameDayDeltaCredits > 0 ? 'var(--orange)' : 'var(--green)';
+    const statusColorVar = `var(--${snap.colorTier})`;
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -793,17 +794,74 @@ function renderDashboardHtml(historyComp, config) {
   <title>Copilot Credit & Token Analytics</title>
   <style>
     :root {
+      color-scheme: dark;
       --bg: #0f172a;
       --card: #1e293b;
+      --input-bg: #0f172a;
+      --track-bg: #0f172a;
       --border: #334155;
+      --row-border: rgba(148, 163, 184, 0.14);
       --text: #f8fafc;
+      --subtext: #cbd5e1;
       --muted: #94a3b8;
+      --btn-bg: #334155;
+      --btn-hover: #475569;
+      --btn-border: #475569;
+      --btn-text: #f8fafc;
       --accent: #38bdf8;
       --purple: #a855f7;
       --green: #22c55e;
       --yellow: #eab308;
       --orange: #f97316;
       --red: #ef4444;
+      --pill-green-fg: #4ade80;
+      --pill-yellow-fg: #facc15;
+      --pill-orange-fg: #fb923c;
+      --pill-red-fg: #f87171;
+      --ws-tag-fg: #7dd3fc;
+      --chart-axis: #334155;
+      --chart-label: #94a3b8;
+      --chart-value: #e2e8f0;
+      --chart-empty: rgba(148, 163, 184, 0.25);
+      --chart-future: rgba(148, 163, 184, 0.10);
+      --chart-cap: rgba(148, 163, 184, 0.12);
+      --selected-stroke: #f8fafc;
+    }
+    body.vscode-light:not([data-theme="dark"]),
+    body.vscode-high-contrast-light:not([data-theme="dark"]),
+    body[data-theme="light"] {
+      color-scheme: light;
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --input-bg: #f8fafc;
+      --track-bg: #e2e8f0;
+      --border: #cbd5e1;
+      --row-border: rgba(100, 116, 139, 0.18);
+      --text: #0f172a;
+      --subtext: #334155;
+      --muted: #64748b;
+      --btn-bg: #f1f5f9;
+      --btn-hover: #e2e8f0;
+      --btn-border: #cbd5e1;
+      --btn-text: #0f172a;
+      --accent: #0284c7;
+      --purple: #9333ea;
+      --green: #16a34a;
+      --yellow: #ca8a04;
+      --orange: #ea580c;
+      --red: #dc2626;
+      --pill-green-fg: #15803d;
+      --pill-yellow-fg: #a16207;
+      --pill-orange-fg: #c2410c;
+      --pill-red-fg: #b91c1c;
+      --ws-tag-fg: #0369a1;
+      --chart-axis: #cbd5e1;
+      --chart-label: #64748b;
+      --chart-value: #1e293b;
+      --chart-empty: rgba(100, 116, 139, 0.22);
+      --chart-future: rgba(100, 116, 139, 0.10);
+      --chart-cap: rgba(100, 116, 139, 0.14);
+      --selected-stroke: #0f172a;
     }
     * { box-sizing: border-box; }
     body {
@@ -834,26 +892,30 @@ function renderDashboardHtml(historyComp, config) {
     }
     .btn-group { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     button {
-      background: #334155;
-      color: #f8fafc;
-      border: 1px solid #475569;
+      background: var(--btn-bg);
+      color: var(--btn-text);
+      border: 1px solid var(--btn-border);
       border-radius: 6px;
       padding: 6px 12px;
       font-size: 12px;
       font-weight: 600;
       cursor: pointer;
     }
-    button:hover { background: #475569; }
-    button.primary { background: #0284c7; border-color: #38bdf8; }
-    button.primary:hover { background: #0369a1; }
+    button:hover { background: var(--btn-hover); }
+    button.primary { background: #0284c7; color: #ffffff; border-color: #0284c7; }
+    button.primary:hover { background: #0369a1; border-color: #0369a1; }
     .month-switcher {
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      background: #1e293b;
-      border: 1px solid #475569;
+      background: var(--card);
+      border: 1px solid var(--btn-border);
       padding: 4px 8px;
       border-radius: 8px;
+    }
+    .month-switcher option {
+      background: var(--card);
+      color: var(--text);
     }
     .kpi-grid {
       display: grid;
@@ -887,10 +949,11 @@ function renderDashboardHtml(historyComp, config) {
       justify-content: space-between;
       margin-top: 5px;
     }
+    .sub-row strong { color: var(--text); }
     .progress-track {
       width: 100%;
       height: 10px;
-      background: #0f172a;
+      background: var(--track-bg);
       border-radius: 99px;
       overflow: hidden;
       margin: 8px 0;
@@ -924,7 +987,7 @@ function renderDashboardHtml(historyComp, config) {
     th, td {
       text-align: left;
       padding: 9px 10px;
-      border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+      border-bottom: 1px solid var(--row-border);
     }
     th {
       color: var(--muted);
@@ -940,13 +1003,13 @@ function renderDashboardHtml(historyComp, config) {
       font-size: 11px;
       font-weight: 600;
     }
-    .pill-green { background: rgba(34, 197, 94, 0.18); color: #4ade80; }
-    .pill-yellow { background: rgba(234, 179, 8, 0.18); color: #facc15; }
-    .pill-orange { background: rgba(249, 115, 22, 0.2); color: #fb923c; }
-    .pill-red { background: rgba(239, 68, 68, 0.22); color: #f87171; }
+    .pill-green { background: rgba(34, 197, 94, 0.16); color: var(--pill-green-fg); }
+    .pill-yellow { background: rgba(234, 179, 8, 0.18); color: var(--pill-yellow-fg); }
+    .pill-orange { background: rgba(249, 115, 22, 0.18); color: var(--pill-orange-fg); }
+    .pill-red { background: rgba(239, 68, 68, 0.18); color: var(--pill-red-fg); }
     .ws-tag {
       background: rgba(56, 189, 248, 0.14);
-      color: #7dd3fc;
+      color: var(--ws-tag-fg);
       padding: 2px 7px;
       border-radius: 5px;
       font-size: 11px;
@@ -971,7 +1034,7 @@ function renderDashboardHtml(historyComp, config) {
       color: var(--muted);
     }
     input, select {
-      background: #0f172a;
+      background: var(--input-bg);
       border: 1px solid var(--border);
       color: var(--text);
       padding: 6px 9px;
@@ -1005,6 +1068,7 @@ function renderDashboardHtml(historyComp, config) {
         </select>
         <button onclick="stepMonth(1)" title="Next Month" style="padding:4px 8px;" ${isViewingCurrentMonth ? 'disabled style="opacity:0.4;cursor:default;padding:4px 8px;"' : ''}>Next ▶</button>
       </div>
+      <button id="themeBtn" onclick="toggleTheme()" title="Toggle Light / Dark mode (follows VS Code theme by default)">🌓 Theme</button>
       <button onclick="sendMsg({type:'export'})">📥 Export CSV / JSON</button>
       <button class="primary" onclick="sendMsg({type:'refresh'})">🔄 Refresh</button>
     </div>
@@ -1014,12 +1078,12 @@ function renderDashboardHtml(historyComp, config) {
   <div class="kpi-grid">
     <div class="card" style="border-color:${snap.colorHex}88;">
       <div class="card-title">1. ${isViewingCurrentMonth ? "Today's Daily Limit" : 'Last Day Limit'} (${config.dailyPercentMode})</div>
-      <div class="big-num" style="color:${snap.colorHex};">
+      <div class="big-num" style="color:${statusColorVar};">
         ${snap.activeDailyPercent.toFixed(1)}%
         <span style="font-size:14px;font-weight:500;color:var(--muted);">(${snap.todayUsedCredits.toFixed(2)} cr)</span>
       </div>
       <div class="progress-track">
-        <div class="progress-fill" style="width:${Math.min(100, snap.activeDailyPercent)}%;background:${snap.colorHex};"></div>
+        <div class="progress-fill" style="width:${Math.min(100, snap.activeDailyPercent)}%;background:${statusColorVar};"></div>
       </div>
       <div class="sub-row">
         <span>Base Daily Limit:</span>
@@ -1037,7 +1101,7 @@ function renderDashboardHtml(historyComp, config) {
         ${snap.totalUsedCredits.toFixed(1)} <span style="font-size:15px;color:var(--muted);">/ ${snap.totalMonthlyCredits} cr</span>
       </div>
       <div class="progress-track">
-        <div class="progress-fill" style="width:${Math.min(100, snap.monthlyUsedPercent)}%;background:#38bdf8;"></div>
+        <div class="progress-fill" style="width:${Math.min(100, snap.monthlyUsedPercent)}%;background:var(--accent);"></div>
       </div>
       <div class="sub-row">
         <span>vs. ${historyComp.previousMonthLabel} (Day ${Math.min(snap.calendar.currentDay, prevSnap.calendar.daysInMonth)}):</span>
@@ -1070,7 +1134,7 @@ function renderDashboardHtml(historyComp, config) {
 
     <div class="card">
       <div class="card-title">4. Usage Averages (${snap.calendar.monthName})</div>
-      <div class="big-num" style="color:#38bdf8;">
+      <div class="big-num" style="color:var(--accent);">
         ${snap.workdayAverageCredits.toFixed(2)} <span style="font-size:14px;color:var(--muted);">cr / workday</span>
       </div>
       <div class="sub-row">
@@ -1116,9 +1180,9 @@ function renderDashboardHtml(historyComp, config) {
         <span class="muted" style="font-size:11px;">Circles above bars = Expensive Chats (&ge;${config.expensiveSessionMinPercent}% limit)</span>
       </div>
       <svg viewBox="0 0 ${chartW} ${chartH}">
-        <line x1="${padL}" y1="${padT + plotH}" x2="${chartW - padR}" y2="${padT + plotH}" stroke="#334155" stroke-width="1" />
-        <line x1="${padL}" y1="${limitY.toFixed(1)}" x2="${chartW - padR}" y2="${limitY.toFixed(1)}" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="5,4" />
-        <text x="${chartW - padR - 4}" y="${Math.max(12, limitY - 5).toFixed(1)}" text-anchor="end" fill="#38bdf8" font-size="10" font-weight="600">
+        <line x1="${padL}" y1="${padT + plotH}" x2="${chartW - padR}" y2="${padT + plotH}" stroke="var(--chart-axis)" stroke-width="1" />
+        <line x1="${padL}" y1="${limitY.toFixed(1)}" x2="${chartW - padR}" y2="${limitY.toFixed(1)}" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="5,4" />
+        <text x="${chartW - padR - 4}" y="${Math.max(12, limitY - 5).toFixed(1)}" text-anchor="end" fill="var(--accent)" font-size="10" font-weight="600">
           Daily Limit: ${snap.recommendedDailyLimit.toFixed(1)} cr
         </text>
         ${dailyBarsSvg}
@@ -1131,11 +1195,11 @@ function renderDashboardHtml(historyComp, config) {
         <span class="muted" style="font-size:11px;">Dashed = Ideal Workday Pace · Solid = Local Chats</span>
       </div>
       <svg viewBox="0 0 ${chartW} ${chartH}">
-        <line x1="${padL}" y1="${padT + plotH}" x2="${chartW - padR}" y2="${padT + plotH}" stroke="#334155" stroke-width="1" />
+        <line x1="${padL}" y1="${padT + plotH}" x2="${chartW - padR}" y2="${padT + plotH}" stroke="var(--chart-axis)" stroke-width="1" />
         <polyline fill="none" stroke="#64748b" stroke-width="2" stroke-dasharray="5,4" points="${budgetPoints.join(' ')}" />
-        ${actualPoints.length > 1 ? `<polyline fill="none" stroke="${snap.creditDebt > 0 ? '#ef4444' : '#22c55e'}" stroke-width="2.8" points="${actualPoints.join(' ')}" />` : ''}
+        ${actualPoints.length > 1 ? `<polyline fill="none" stroke="${snap.creditDebt > 0 ? 'var(--red)' : 'var(--green)'}" stroke-width="2.8" points="${actualPoints.join(' ')}" />` : ''}
         ${liveApiDotSvg}
-        <text x="${padL + 6}" y="${padT + 14}" fill="#94a3b8" font-size="11">
+        <text x="${padL + 6}" y="${padT + 14}" fill="var(--chart-label)" font-size="11">
           Monthly Cap: ${snap.totalMonthlyCredits} cr | Used: ${snap.totalUsedCredits.toFixed(1)} cr | Projected EOM: ${snap.projectedMonthlyCredits.toFixed(1)} cr
         </text>
       </svg>
@@ -1148,16 +1212,16 @@ function renderDashboardHtml(historyComp, config) {
       <div class="section-title">
         <span>🔄 History Comparison: ${snap.calendar.monthName} vs. ${hasPrevMonthActivity ? historyComp.previousMonthLabel : 'Ideal Budget Pace'}</span>
         <span class="muted" style="font-size:11px;">
-          <span style="color:#38bdf8;font-weight:700;">━ ${snap.calendar.monthName.slice(0, 3)} (${snap.totalUsedCredits.toFixed(1)} cr)</span> &nbsp;·&nbsp;
-          <span style="color:#a855f7;font-weight:700;">┅ ${hasPrevMonthActivity ? `${historyComp.previousMonthLabel.slice(0, 3)} (${prevSnap.totalUsedCredits.toFixed(1)} cr)` : 'Ideal Workday Pace'}</span>
+          <span style="color:var(--accent);font-weight:700;">━ ${snap.calendar.monthName.slice(0, 3)} (${snap.totalUsedCredits.toFixed(1)} cr)</span> &nbsp;·&nbsp;
+          <span style="color:var(--purple);font-weight:700;">┅ ${hasPrevMonthActivity ? `${historyComp.previousMonthLabel.slice(0, 3)} (${prevSnap.totalUsedCredits.toFixed(1)} cr)` : 'Ideal Workday Pace'}</span>
         </span>
       </div>
       <svg viewBox="0 0 ${chartW} ${chartH}">
-        <line x1="${padL}" y1="${padT + plotH}" x2="${chartW - padR}" y2="${padT + plotH}" stroke="#334155" stroke-width="1" />
-        ${prevOrIdealCumPoints.length > 1 ? `<polyline fill="none" stroke="#a855f7" stroke-width="2.2" stroke-dasharray="6,4" points="${prevOrIdealCumPoints.join(' ')}" />` : ''}
-        ${selectedCumPoints.length > 1 ? `<polyline fill="none" stroke="#38bdf8" stroke-width="3" points="${selectedCumPoints.join(' ')}" />` : ''}
+        <line x1="${padL}" y1="${padT + plotH}" x2="${chartW - padR}" y2="${padT + plotH}" stroke="var(--chart-axis)" stroke-width="1" />
+        ${prevOrIdealCumPoints.length > 1 ? `<polyline fill="none" stroke="var(--purple)" stroke-width="2.2" stroke-dasharray="6,4" points="${prevOrIdealCumPoints.join(' ')}" />` : ''}
+        ${selectedCumPoints.length > 1 ? `<polyline fill="none" stroke="var(--accent)" stroke-width="3" points="${selectedCumPoints.join(' ')}" />` : ''}
         ${compareDayMarkersSvg.join('')}
-        <text x="${padL + 6}" y="${padT + 14}" fill="#cbd5e1" font-size="11">
+        <text x="${padL + 6}" y="${padT + 14}" fill="var(--subtext)" font-size="11">
           ${hasPrevMonthActivity
         ? `Through Day ${Math.min(snap.calendar.currentDay, prevSnap.calendar.daysInMonth)}: ${snap.calendar.monthName.slice(0, 3)} = ${historyComp.sameDaySelectedCredits.toFixed(1)} cr vs ${historyComp.previousMonthLabel.slice(0, 3)} = ${historyComp.sameDayPreviousCredits.toFixed(1)} cr (${momDeltaSign}${historyComp.momSameDayDeltaCredits.toFixed(1)} cr)`
         : `No ${historyComp.previousMonthLabel} activity found — comparing ${snap.calendar.monthName} against your Ideal Workday Pace`}
@@ -1171,7 +1235,7 @@ function renderDashboardHtml(historyComp, config) {
         <span class="muted" style="font-size:11px;">Click any month bar to view its full report</span>
       </div>
       <svg viewBox="0 0 ${chartW} ${chartH}">
-        <line x1="${padL}" y1="${padT + plotH}" x2="${chartW - padR}" y2="${padT + plotH}" stroke="#334155" stroke-width="1" />
+        <line x1="${padL}" y1="${padT + plotH}" x2="${chartW - padR}" y2="${padT + plotH}" stroke="var(--chart-axis)" stroke-width="1" />
         ${multiMonthBarsSvg}
       </svg>
     </div>
@@ -1210,7 +1274,7 @@ function renderDashboardHtml(historyComp, config) {
         <span class="muted" style="font-size:11px;">Active Coding Hour Avg: ${snap.activeHourAverageCredits.toFixed(2)} cr/hr</span>
       </div>
       <svg viewBox="0 0 ${chartW} ${chartH}">
-        <line x1="${padL}" y1="${padT + plotH}" x2="${chartW - padR}" y2="${padT + plotH}" stroke="#334155" stroke-width="1" />
+        <line x1="${padL}" y1="${padT + plotH}" x2="${chartW - padR}" y2="${padT + plotH}" stroke="var(--chart-axis)" stroke-width="1" />
         ${hourlyBarsSvg}
       </svg>
     </div>
@@ -1351,6 +1415,38 @@ function renderDashboardHtml(historyComp, config) {
 
   <script>
     const vscode = acquireVsCodeApi();
+    function isEffectiveLight() {
+      const explicit = document.body.getAttribute('data-theme');
+      if (explicit) {
+        return explicit === 'light';
+      }
+      return (
+        document.body.classList.contains('vscode-light') ||
+        document.body.classList.contains('vscode-high-contrast-light')
+      );
+    }
+    function syncThemeButton() {
+      const btn = document.getElementById('themeBtn');
+      if (btn) {
+        btn.textContent = isEffectiveLight() ? '🌙 Dark' : '☀️ Light';
+      }
+    }
+    function toggleTheme() {
+      const next = isEffectiveLight() ? 'dark' : 'light';
+      document.body.setAttribute('data-theme', next);
+      vscode.setState({ ...(vscode.getState() || {}), theme: next });
+      syncThemeButton();
+    }
+    const savedState = vscode.getState();
+    if (savedState && (savedState.theme === 'light' || savedState.theme === 'dark')) {
+      document.body.setAttribute('data-theme', savedState.theme);
+    }
+    syncThemeButton();
+    new MutationObserver(syncThemeButton).observe(document.body, {
+      attributes: true,
+      attributeFilter: ['class']
+    });
+
     function sendMsg(msg) {
       vscode.postMessage(msg);
     }
